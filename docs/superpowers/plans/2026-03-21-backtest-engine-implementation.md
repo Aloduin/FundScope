@@ -341,7 +341,7 @@ class TestStrategyInterface:
 
         nav_history = [
             {"date": date(2024, 1, 1), "nav": 1.0},
-            {"date": "2024, 1, 15), "nav": 1.1},
+            {"date": date(2024, 1, 15), "nav": 1.1},
         ]
 
         signals = strategy.generate_signals(nav_history)
@@ -850,6 +850,7 @@ Create `tests/domain/backtest/test_engine.py`:
 from datetime import date, timedelta
 from domain.backtest.engine import BacktestEngine
 from domain.backtest.strategies.dca import DCAStrategy
+from domain.backtest.models import Signal
 
 
 def generate_mock_nav_history(start_date: date, periods: int = 60) -> list[dict]:
@@ -872,13 +873,15 @@ def generate_mock_nav_history(start_date: date, periods: int = 60) -> list[dict]
 class MockStrategy:
     """Mock strategy for engine testing."""
 
-    def __init__(self, signals):
+    def __init__(self, signals: list):
+        """Initialize with list of Signal objects."""
         self._signals = signals
 
     def name(self) -> str:
         return "Mock"
 
     def generate_signals(self, nav_history):
+        """Return pre-configured signals (already Signal objects)."""
         return self._signals
 
 
@@ -937,7 +940,6 @@ class TestBacktestEngine:
             reason="Test signal"
         )
 
-        from domain.backtest.models import Signal
         strategy = MockStrategy([signal])
         engine = BacktestEngine(initial_cash=100000)
 
@@ -1225,14 +1227,19 @@ from domain.backtest.strategies.base import Strategy
 from domain.backtest.strategies.dca import DCAStrategy
 from domain.backtest.strategies.ma import MAStrategy
 from infrastructure.datasource.akshare_source import AkShareDataSource
+from infrastructure.datasource.abstract import AbstractDataSource
 
 
 class BacktestService:
     """Service for orchestrating backtest operations."""
 
-    def __init__(self):
-        """Initialize backtest service."""
-        self.datasource = AkShareDataSource()
+    def __init__(self, datasource: AbstractDataSource = None):
+        """Initialize backtest service.
+
+        Args:
+            datasource: Optional data source (defaults to AkShareDataSource)
+        """
+        self.datasource = datasource or AkShareDataSource()
 
     def _create_strategy(self, strategy_name: str, params: dict) -> Strategy:
         """Create strategy instance by name.

@@ -1,6 +1,8 @@
 # akshare API 参考文档
 
 > 本文档基于 akshare v1.18.42 版本实测编写，记录基金相关 API 的真实可用调用方式。
+>
+> **在线文档：** https://akshare.akfamily.xyz/
 
 ---
 

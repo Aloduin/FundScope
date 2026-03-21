@@ -1,7 +1,9 @@
 """Strategy Lab Page - Create virtual account, execute trades, view positions."""
 import streamlit as st
 from service.simulation_service import SimulationService
-from datetime import date
+from service.backtest_service import BacktestService
+from datetime import date, timedelta
+import plotly.graph_objects as go
 
 st.set_page_config(
     page_title="策略验证 - FundScope",
@@ -11,12 +13,17 @@ st.set_page_config(
 st.title("🧪 策略验证中心")
 st.markdown("创建虚拟账户，执行模拟交易，跟踪持仓收益")
 
-# Initialize service
-@st.cache_resource
-def get_simulation_service():
-    return SimulationService()
+# Create tabs
+tab_account, tab_backtest = st.tabs(["虚拟账户", "策略回测"])
 
-service = get_simulation_service()
+# ========== Virtual Account Tab ==========
+with tab_account:
+    # Initialize service
+    @st.cache_resource
+    def get_simulation_service():
+        return SimulationService()
+
+    service = get_simulation_service()
 
 # Session state
 if "current_account" not in st.session_state:
@@ -179,3 +186,149 @@ else:
         st.session_state.current_account = None
         st.session_state.account_id = ""
         st.rerun()
+
+# ========== Backtest Tab ==========
+with tab_backtest:
+    st.subheader("策略回测")
+    st.markdown("选择基金和策略，运行历史回测")
+
+    # Initialize backtest service
+    @st.cache_resource
+    def get_backtest_service():
+        return BacktestService()
+
+    backtest_service = get_backtest_service()
+
+    # Input form
+    col1, col2 = st.columns(2)
+    with col1:
+        backtest_fund_code = st.text_input("基金代码", placeholder="例如：000001", max_chars=6, key="bt_fund_code")
+    with col2:
+        strategy_name = st.selectbox("策略选择", options=["DCA", "MA Timing"], key="bt_strategy")
+
+    # Strategy parameters
+    st.markdown("**策略参数**")
+    if strategy_name == "DCA":
+        col1, col2 = st.columns(2)
+        with col1:
+            dca_invest_amount = st.number_input("每次投资金额 (元)", min_value=1000.0, step=1000.0, value=10000.0, key="bt_dca_amount")
+        with col2:
+            dca_interval = st.number_input("投资间隔 (天)", min_value=7, step=7, value=20, key="bt_dca_interval")
+        strategy_params = {
+            "invest_amount": dca_invest_amount,
+            "interval_days": dca_interval
+        }
+    else:  # MA Timing
+        col1, col2 = st.columns(2)
+        with col1:
+            ma_short_window = st.number_input("短期均线 (天)", min_value=3, step=1, value=5, key="bt_ma_short")
+        with col2:
+            ma_long_window = st.number_input("长期均线 (天)", min_value=10, step=5, value=20, key="bt_ma_long")
+        strategy_params = {
+            "short_window": ma_short_window,
+            "long_window": ma_long_window
+        }
+
+    # Date range
+    st.markdown("**回测区间**")
+    col1, col2 = st.columns(2)
+    with col1:
+        default_start = date.today() - timedelta(days=365)
+        start_date = st.date_input("开始日期", value=default_start, key="bt_start_date")
+    with col2:
+        end_date = st.date_input("结束日期", value=date.today(), key="bt_end_date")
+
+    # Initial cash
+    initial_cash = st.number_input("初始资金 (元)", min_value=10000.0, step=10000.0, value=100000.0, key="bt_initial_cash")
+
+    # Run backtest button
+    if st.button("运行回测", type="primary", use_container_width=True):
+        if backtest_fund_code:
+            if start_date >= end_date:
+                st.error("开始日期必须早于结束日期")
+            else:
+                with st.spinner(f"正在回测基金 {backtest_fund_code}..."):
+                    try:
+                        result = backtest_service.run_backtest(
+                            fund_code=backtest_fund_code,
+                            strategy_name=strategy_name,
+                            strategy_params=strategy_params,
+                            start_date=start_date,
+                            end_date=end_date,
+                            initial_cash=initial_cash
+                        )
+
+                        # Metrics display
+                        st.subheader("回测结果")
+                        col1, col2, col3, col4, col5 = st.columns(5)
+                        with col1:
+                            total_return_pct = result.total_return * 100
+                            return_color = "green" if total_return_pct >= 0 else "red"
+                            col1.metric("总收益", f"{total_return_pct:.2f}%", delta=f"{total_return_pct:+.2f}%" if total_return_pct != 0 else None)
+                        with col2:
+                            annual_return_pct = result.annualized_return * 100
+                            col2.metric("年化收益", f"{annual_return_pct:.2f}%")
+                        with col3:
+                            max_dd_pct = result.max_drawdown * 100
+                            col3.metric("最大回撤", f"-{max_dd_pct:.2f}%", delta=f"{-max_dd_pct:.2f}%" if max_dd_pct > 0 else None, delta_color="inverse")
+                        with col4:
+                            col4.metric("夏普比率", f"{result.sharpe_ratio:.2f}")
+                        with col5:
+                            col5.metric("胜率", f"{result.win_rate:.1%}")
+
+                        # Equity curve chart
+                        st.subheader("净值曲线")
+                        if result.equity_curve:
+                            dates = [point[0] for point in result.equity_curve]
+                            values = [point[1] for point in result.equity_curve]
+
+                            fig = go.Figure()
+                            fig.add_trace(go.Scatter(
+                                x=dates,
+                                y=values,
+                                mode='lines',
+                                name='账户净值',
+                                line=dict(color='blue', width=2)
+                            ))
+
+                            fig.update_layout(
+                                title='回测期间账户净值变化',
+                                xaxis_title='日期',
+                                yaxis_title='账户净值 (元)',
+                                hovermode='x unified',
+                                height=400
+                            )
+
+                            st.plotly_chart(fig, use_container_width=True)
+
+                        # Executed trades table
+                        st.subheader("交易记录")
+                        if result.executed_trades:
+                            trades_data = []
+                            for t in result.executed_trades:
+                                trades_data.append({
+                                    "日期": str(t.date),
+                                    "类型": "买入" if t.action == "BUY" else "卖出",
+                                    "基金代码": t.fund_code,
+                                    "金额": f"¥{t.amount:,.0f}",
+                                    "净值": f"¥{t.nav:.4f}",
+                                    "份额": f"{t.shares:.2f}",
+                                    "原因": t.reason
+                                })
+                            st.table(trades_data)
+
+                            # Trade statistics
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                buy_trades = [t for t in result.executed_trades if t.action == "BUY"]
+                                st.metric("买入次数", len(buy_trades))
+                            with col2:
+                                sell_trades = [t for t in result.executed_trades if t.action == "SELL"]
+                                st.metric("卖出次数", len(sell_trades))
+                        else:
+                            st.info("回测期间无交易执行")
+
+                    except Exception as e:
+                        st.error(f"回测失败：{str(e)}")
+        else:
+            st.warning("请输入基金代码")

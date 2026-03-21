@@ -419,7 +419,11 @@ class AkShareDataSource(AbstractDataSource):
         end_date: date
     ) -> pd.DataFrame:
         """Fetch NAV history for open-ended funds (东方财富数据源)."""
-        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+        try:
+            df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+        except Exception as e:
+            logger.warning(f"fund_open_fund_info_em failed for {fund_code}: {e}")
+            return pd.DataFrame()
 
         # Check if DataFrame is empty
         if df.empty:
@@ -468,7 +472,7 @@ class AkShareDataSource(AbstractDataSource):
             )
         except Exception as e:
             logger.warning(f"ETF API failed for {fund_code}: {e}")
-            return pd.DataFrame()
+            return self._fetch_etf_hist_nav(fund_code, start_date, end_date)
 
         # Check if DataFrame is empty
         if df.empty:
@@ -501,6 +505,46 @@ class AkShareDataSource(AbstractDataSource):
             df['acc_nav'] = df['acc_nav'].apply(lambda x: float(x) if pd.notna(x) and x > 0 else df['nav'])
 
         return df[['date', 'nav', 'acc_nav']]
+
+    def _fetch_etf_hist_nav(
+        self,
+        fund_code: str,
+        start_date: date,
+        end_date: date
+    ) -> pd.DataFrame:
+        """Fetch ETF NAV history via fund_etf_hist_em (备用数据源)."""
+        try:
+            df = ak.fund_etf_hist_em(
+                symbol=fund_code,
+                period="daily",
+                start_date=start_date.strftime("%Y%m%d"),
+                end_date=end_date.strftime("%Y%m%d"),
+                adjust=""
+            )
+        except Exception as e:
+            logger.warning(f"fund_etf_hist_em failed for {fund_code}: {e}")
+            return pd.DataFrame()
+
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        # Standardize columns: 日期, 收盘 → date, nav
+        column_mapping = {
+            "日期": "date",
+            "收盘": "nav",
+        }
+        df = df.rename(columns={col: column_mapping.get(col, col) for col in df.columns})
+
+        if "date" not in df.columns or "nav" not in df.columns:
+            logger.warning(f"fund_etf_hist_em unexpected columns for {fund_code}: {list(df.columns)}")
+            return pd.DataFrame()
+
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        df = df[(df["date"] >= start_date) & (df["date"] <= end_date)]
+        df["nav"] = pd.to_numeric(df["nav"], errors="coerce").fillna(0.0)
+        df["acc_nav"] = df["nav"]  # ETF hist API has no acc_nav
+
+        return df[["date", "nav", "acc_nav"]]
 
     def _validate_nav_history(self, history: list[dict]) -> bool:
         """Validate NAV history data quality.

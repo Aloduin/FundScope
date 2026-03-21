@@ -55,6 +55,7 @@ ui → service → domain → infrastructure
 - `domain/fund/` - 基金子域（指标、评分、分类）
 - `domain/portfolio/` - 组合子域（持仓、诊断）
 - `domain/simulation/` - 模拟子域（账户、交易）
+- `domain/backtest/` - 回测子域（引擎、策略、信号）
 
 **原则：**
 - 不调用外部 API
@@ -189,6 +190,55 @@ class VirtualAccount:
     equity_curve: list[tuple[date, float]]
     created_at: datetime
 ```
+
+### 3.4 回测层
+
+```python
+@dataclass
+class Signal:
+    """策略产生的交易信号"""
+    date: date
+    fund_code: str
+    action: Literal["BUY", "SELL", "REBALANCE", "HOLD"]
+    confidence: float  # 0.0~1.0
+    reason: str  # 必填，决策可解释性
+    amount: float | None = None
+    target_weight: float | None = None
+
+@dataclass
+class ExecutedTrade:
+    """回测中执行的交易记录"""
+    date: date
+    fund_code: str
+    action: Literal["BUY", "SELL"]
+    amount: float
+    nav: float
+    shares: float
+    reason: str
+
+@dataclass
+class BacktestResult:
+    """回测结果汇总"""
+    strategy_name: str
+    fund_code: str
+    start_date: date
+    end_date: date
+    total_return: float
+    annualized_return: float
+    max_drawdown: float  # 正值，如 0.08 表示 8% 回撤
+    sharpe_ratio: float
+    win_rate: float
+    trade_count: int
+    signals: list[Signal]
+    equity_curve: list[tuple[date, float]]
+    executed_trades: list[ExecutedTrade]
+```
+
+**回测规则：**
+- T 日产生信号，T+1 日净值成交（简化回测假设）
+- 禁止未来函数（仅使用当前及历史数据）
+- 边界保护：不可超买（现金限制）、不可超卖（持仓限制）
+- 所有策略必须通过 `Strategy` 抽象接口实现
 
 ---
 
@@ -379,6 +429,24 @@ class CustomDataSource(AbstractDataSource):
 ### 9.3 添加新页面
 
 在 `ui/pages/` 创建 `<N>_<name>.py`，Streamlit 自动识别。
+
+### 9.4 添加新策略
+
+1. 继承 `Strategy` 抽象类
+2. 实现 `name()` 和 `generate_signals()` 方法
+3. 在 UI 中添加策略选项
+
+```python
+from domain.backtest.strategies.base import Strategy
+
+class MyStrategy(Strategy):
+    def name(self) -> str:
+        return "My Custom Strategy"
+
+    def generate_signals(self, nav_history: list[dict]) -> list[Signal]:
+        # 你的策略逻辑
+        pass
+```
 
 ---
 

@@ -4,7 +4,10 @@ MVP Phase 1: Mock data for interface testing.
 Phase 2: Replace with real akshare API calls.
 """
 from datetime import date, timedelta
+from typing import Any
 import numpy as np
+import pandas as pd
+import akshare as ak
 from shared.logger import get_logger
 from .abstract import AbstractDataSource
 from .cache import cached
@@ -29,11 +32,11 @@ class AkShareDataSource(AbstractDataSource):
 
         Args:
             use_mock: If True, use mock data as fallback.
-                      If False, use real akshare API (not implemented in Task 2).
+                      If False, use real akshare API.
         """
         self.use_mock = use_mock
         if not use_mock:
-            logger.info("使用真实 akshare API（暂未实现，将抛出 NotImplementedError）")
+            logger.info("使用真实 akshare API")
         else:
             logger.info("使用 Mock 数据模式")
 
@@ -41,7 +44,7 @@ class AkShareDataSource(AbstractDataSource):
     def get_fund_basic_info(self, fund_code: str) -> dict:
         """Get basic fund information.
 
-        Phase 2: Replace with akshare.fund_individual_basic_info_xq() calls.
+        Phase 2: Uses akshare.fund_individual_basic_info_xq() for real data.
 
         Args:
             fund_code: Fund code (e.g., '000001')
@@ -50,17 +53,7 @@ class AkShareDataSource(AbstractDataSource):
             Dictionary containing fund basic info.
 
         Raises:
-            NotImplementedError: If use_mock is False (real API not implemented).
-
-        Task 6 TODO:
-        ```python
-        import akshare as ak
-
-        # 使用雪球数据源获取基金基本信息
-        df = ak.fund_individual_basic_info_xq(symbol=fund_code)
-        # 返回 DataFrame，需要转换为 dict
-        # 包含：基金代码、基金名称、成立时间、基金规模、基金公司、基金经理等
-        ```
+            NotImplementedError: If use_mock is False and real API fails.
         """
         if not self.use_mock:
             # Check L2 cache first
@@ -68,13 +61,17 @@ class AkShareDataSource(AbstractDataSource):
             if cached_data is not None:
                 return cached_data
 
-            # Task 6: Implement real akshare API call
-            raise NotImplementedError(
-                "Real akshare API for get_fund_basic_info not implemented yet. "
-                "Set use_mock=True to use mock data."
-            )
+            # Call real akshare API
+            result = self._get_real_fund_info(fund_code)
 
-        logger.info(f"获取基金基本信息：{fund_code}")
+            # Validate and save to L2 cache
+            if self._validate_fund_info(result):
+                save_cached_response(fund_code, "fund_info", result)
+                return result
+
+            raise ValueError(f"Invalid fund info for {fund_code}")
+
+        logger.info(f"获取基金基本信息：{fund_code} (Mock)")
         return {
             "fund_code": fund_code,
             "fund_name": f"测试基金{fund_code}",
@@ -87,6 +84,166 @@ class AkShareDataSource(AbstractDataSource):
             "subscription_fee": 0.015,
         }
 
+    def _get_real_fund_info(self, fund_code: str) -> dict:
+        """Get real fund info from akshare API.
+
+        Args:
+            fund_code: Fund code (e.g., '000001')
+
+        Returns:
+            Dictionary containing standardized fund info.
+        """
+        logger.info(f"获取真实基金信息：{fund_code}")
+
+        # Use雪球数据源获取基金基本信息
+        df = ak.fund_individual_basic_info_xq(symbol=fund_code)
+
+        # Convert DataFrame (item/value pairs) to dict
+        info_dict = {}
+        for _, row in df.iterrows():
+            item = row['item']
+            value = row['value']
+            info_dict[item] = value
+
+        # Map to standardized field names
+        result = {
+            "fund_code": fund_code,
+            "fund_name": info_dict.get("基金名称", ""),
+            "fund_full_name": info_dict.get("基金全称", ""),
+            "fund_type": self._map_fund_type(info_dict.get("投资类型", "")),
+            "manager_name": info_dict.get("基金经理", ""),
+            "manager_tenure": self._parse_manager_tenure(info_dict.get("基金经理", info_dict.get("任职时间", ""))),
+            "fund_size": self._parse_fund_size(info_dict.get("最新规模", "")),
+            "establishment_date": self._parse_date(info_dict.get("成立时间", "")),
+            "fund_company": info_dict.get("基金公司", ""),
+            "custodian": info_dict.get("托管银行", ""),
+            "investment_objective": info_dict.get("投资目标", ""),
+            "investment_strategy": info_dict.get("投资策略", ""),
+            "benchmark": info_dict.get("业绩比较基准", ""),
+            # Default fee values (akshare doesn't always provide fee info)
+            "management_fee": 0.015,
+            "custodian_fee": 0.0025,
+            "subscription_fee": 0.015,
+        }
+
+        return result
+
+    def _validate_fund_info(self, info: dict) -> bool:
+        """Validate fund info data quality.
+
+        Args:
+            info: Fund info dictionary
+
+        Returns:
+            True if valid, False otherwise
+        """
+        if not info:
+            return False
+
+        # Required fields
+        required = ["fund_code", "fund_name"]
+        for field in required:
+            if not info.get(field):
+                logger.warning(f"Missing required field: {field}")
+                return False
+
+        logger.info(f"基金信息验证通过：{info['fund_code']}")
+        return True
+
+    def _map_fund_type(self, raw_type: str) -> str:
+        """Map raw fund type to standardized type.
+
+        Args:
+            raw_type: Raw type string from akshare
+
+        Returns:
+            Standardized type (股票型/混合型/债券型/指数型/货币型/QDII)
+        """
+        if not raw_type:
+            return "混合型"
+
+        type_mapping = {
+            "股票": "股票型",
+            "股票型": "股票型",
+            "混合": "混合型",
+            "混合型": "混合型",
+            "债券": "债券型",
+            "债券型": "债券型",
+            "指数": "指数型",
+            "指数型": "指数型",
+            "货币": "货币型",
+            "货币型": "货币型",
+            "QDII": "QDII",
+            "qdii": "QDII",
+        }
+
+        for key, value in type_mapping.items():
+            if key in raw_type:
+                return value
+
+        return "混合型"  # Default
+
+    def _parse_fund_size(self, raw_size: str) -> float:
+        """Parse fund size string to float (in 亿元).
+
+        Args:
+            raw_size: Raw size string (e.g., "29.37 亿", "1000 万")
+
+        Returns:
+            Fund size in 亿元
+        """
+        if not raw_size or pd.isna(raw_size):
+            return 0.0
+
+        try:
+            raw_size = str(raw_size)
+            if "亿" in raw_size:
+                return float(raw_size.replace("亿", "").replace("元", "").strip())
+            elif "万" in raw_size:
+                return float(raw_size.replace("万", "").replace("元", "").strip()) / 10000
+            else:
+                return float(raw_size.replace("元", "").strip())
+        except (ValueError, AttributeError):
+            return 0.0
+
+    def _parse_manager_tenure(self, raw_tenure: str) -> float:
+        """Parse manager tenure string to float (in years).
+
+        Args:
+            raw_tenure: Raw tenure string
+
+        Returns:
+            Manager tenure in years
+        """
+        if not raw_tenure or pd.isna(raw_tenure):
+            return 0.0
+
+        try:
+            raw_tenure = str(raw_tenure)
+            if "年" in raw_tenure:
+                return float(raw_tenure.replace("年", "").strip())
+            else:
+                return 0.0
+        except (ValueError, AttributeError):
+            return 0.0
+
+    def _parse_date(self, raw_date: str) -> date | None:
+        """Parse date string to date object.
+
+        Args:
+            raw_date: Raw date string (e.g., "2001-12-18")
+
+        Returns:
+            date object or None
+        """
+        if not raw_date or pd.isna(raw_date):
+            return None
+
+        try:
+            return date.fromisoformat(str(raw_date))
+        except ValueError:
+            return None
+
     @cached(key_prefix="nav_history")
     def get_fund_nav_history(
         self,
@@ -96,7 +253,7 @@ class AkShareDataSource(AbstractDataSource):
     ) -> list[dict]:
         """Get fund NAV history.
 
-        Phase 2: Replace with akshare.fund_open_fund_info_em() calls.
+        Phase 2: Uses akshare.fund_open_fund_info_em() for real data.
 
         Args:
             fund_code: Fund code (e.g., '000001')
@@ -107,24 +264,7 @@ class AkShareDataSource(AbstractDataSource):
             List of dictionaries containing NAV history.
 
         Raises:
-            NotImplementedError: If use_mock is False (real API not implemented).
-
-        Task 6 TODO:
-        ```python
-        import akshare as ak
-
-        # 开放式基金历史净值（东方财富数据源）
-        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
-        # 返回 DataFrame，包含：净值日期、单位净值、日增长率
-
-        # 或者 ETF/LOF 基金历史净值
-        df = ak.fund_etf_fund_info_em(
-            fund=fund_code,
-            start_date=start_date.strftime("%Y%m%d"),
-            end_date=end_date.strftime("%Y%m%d")
-        )
-        # 返回 DataFrame，包含：净值日期、单位净值、累计净值、涨跌幅、申购状态、赎回状态
-        ```
+            NotImplementedError: If use_mock is False and real API fails.
         """
         if not self.use_mock:
             # Check L2 cache first
@@ -132,13 +272,17 @@ class AkShareDataSource(AbstractDataSource):
             if cached_data is not None:
                 return cached_data
 
-            # Task 6: Implement real akshare API call
-            raise NotImplementedError(
-                "Real akshare API for get_fund_nav_history not implemented yet. "
-                "Set use_mock=True to use mock data."
-            )
+            # Call real akshare API
+            result = self._get_real_nav_history(fund_code, start_date, end_date)
 
-        logger.info(f"获取基金净值历史：{fund_code}")
+            # Validate and save to L2 cache
+            if self._validate_nav_history(result):
+                save_cached_response(fund_code, "nav_history", result)
+                return result
+
+            raise ValueError(f"Invalid NAV history for {fund_code}")
+
+        logger.info(f"获取基金净值历史：{fund_code} (Mock)")
 
         if end_date is None:
             end_date = date.today()
@@ -162,3 +306,132 @@ class AkShareDataSource(AbstractDataSource):
             current += timedelta(days=1)
 
         return result
+
+    def _get_real_nav_history(
+        self,
+        fund_code: str,
+        start_date: date | None = None,
+        end_date: date | None = None
+    ) -> list[dict]:
+        """Get real NAV history from akshare API.
+
+        Args:
+            fund_code: Fund code (e.g., '000001')
+            start_date: Start date (default: 3 years ago)
+            end_date: End date (default: today)
+
+        Returns:
+            List of dictionaries containing standardized NAV history.
+        """
+        logger.info(f"获取真实基金净值历史：{fund_code}")
+
+        if end_date is None:
+            end_date = date.today()
+        if start_date is None:
+            start_date = end_date - timedelta(days=365 * 3)
+
+        # 开放式基金历史净值（东方财富数据源）
+        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+
+        # Check if DataFrame is empty
+        if df.empty:
+            logger.warning(f"fund_open_fund_info_em returned empty data for {fund_code}")
+            return []
+
+        # Standardize column names
+        # Expected columns: 净值日期，单位净值，累计净值，日增长率
+        column_mapping = {
+            "净值日期": "date",
+            "单位净值": "nav",
+            "累计净值": "acc_nav",
+            "日增长率": "daily_growth",
+        }
+
+        # Rename columns if they exist
+        available_cols = {col: column_mapping.get(col, col) for col in df.columns}
+        df = df.rename(columns=available_cols)
+
+        result = []
+        for _, row in df.iterrows():
+            try:
+                # Parse date
+                date_str = str(row.get("date", ""))
+                if not date_str or date_str == "None":
+                    continue
+
+                parsed_date = self._parse_date(date_str)
+                if parsed_date is None:
+                    continue
+
+                # Filter by date range
+                if parsed_date < start_date or parsed_date > end_date:
+                    continue
+
+                # Parse NAV values
+                nav = self._parse_nav_value(row.get("nav"))
+                acc_nav = self._parse_nav_value(row.get("acc_nav", nav))  # Use nav as fallback
+
+                # Skip invalid data
+                if nav <= 0:
+                    continue
+
+                result.append({
+                    "date": parsed_date,
+                    "nav": nav,
+                    "acc_nav": acc_nav,
+                })
+
+            except Exception as e:
+                logger.warning(f"Error parsing NAV row: {e}")
+                continue
+
+        # Sort by date (ascending)
+        result.sort(key=lambda x: x["date"])
+
+        logger.info(f"获取净值历史完成：{fund_code}, {len(result)} 条记录")
+        return result
+
+    def _validate_nav_history(self, history: list[dict]) -> bool:
+        """Validate NAV history data quality.
+
+        Args:
+            history: List of NAV records
+
+        Returns:
+            True if valid, False otherwise
+        """
+        if not history:
+            return False
+
+        if len(history) < 10:  # Minimum data points
+            logger.warning(f"NAV history too short: {len(history)} records")
+            return False
+
+        # Check required fields and positive values
+        for record in history:
+            if "date" not in record or "nav" not in record:
+                logger.warning("Missing required field in NAV record")
+                return False
+            if record["nav"] <= 0:
+                logger.warning("Invalid NAV value <= 0")
+                return False
+
+        logger.info(f"NAV 历史验证通过：{len(history)} 条记录")
+        return True
+
+    def _parse_nav_value(self, value: Any) -> float:
+        """Parse NAV value string to float.
+
+        Args:
+            value: Raw value (string or numeric)
+
+        Returns:
+            Parsed float value, or 0.0 if invalid
+        """
+        if value is None or pd.isna(value):
+            return 0.0
+
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return 0.0

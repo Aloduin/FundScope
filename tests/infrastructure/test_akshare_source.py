@@ -91,16 +91,88 @@ class TestMockNavHistory:
             assert item["acc_nav"] > 0
 
 
+class TestRealAkShareApi:
+    """Tests for real akshare API integration."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.datasource = AkShareDataSource(use_mock=False)
+
+    def test_real_fund_info_returns_dict(self):
+        """Test real fund info returns correct structure."""
+        result = self.datasource.get_fund_basic_info("000001")
+
+        assert isinstance(result, dict)
+        assert result["fund_code"] == "000001"
+        assert "fund_name" in result
+        assert result["fund_name"] != ""  # Should have real name
+        assert "fund_type" in result
+        assert "management_fee" in result
+
+    def test_real_fund_info_cache(self):
+        """Test that fund info is cached."""
+        # First call (fetches from API)
+        result1 = self.datasource.get_fund_basic_info("000001")
+        assert isinstance(result1, dict)
+
+        # Second call (should use cache)
+        result2 = self.datasource.get_fund_basic_info("000001")
+        assert result1 == result2
+
+    def test_real_nav_history_returns_list(self):
+        """Test real NAV history returns list of dicts."""
+        result = self.datasource.get_fund_nav_history("000001")
+
+        assert isinstance(result, list)
+        assert len(result) > 0
+
+        # Check structure of first item
+        first = result[0]
+        assert "date" in first
+        assert "nav" in first
+        assert "acc_nav" in first
+        assert isinstance(first["date"], date)
+        assert isinstance(first["nav"], float)
+
+    def test_real_nav_history_with_date_range(self):
+        """Test real NAV history with custom date range."""
+        end_date = date.today()
+        start_date = end_date - timedelta(days=30)
+
+        result = self.datasource.get_fund_nav_history(
+            "000001",
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        assert isinstance(result, list)
+        # Should have at least some data points
+        assert len(result) > 0
+
+        # Check all dates are within range
+        for item in result:
+            assert item["date"] >= start_date
+            assert item["date"] <= end_date
+
+    def test_real_nav_history_cache(self):
+        """Test that NAV history is cached."""
+        # First call (fetches from API)
+        result1 = self.datasource.get_fund_nav_history("000001")
+        assert isinstance(result1, list)
+
+        # Second call (should use cache)
+        result2 = self.datasource.get_fund_nav_history("000001")
+        assert result1 == result2
+
+
 class TestMockFallback:
     """Tests for mock fallback mechanism."""
 
-    def test_use_mock_false_raises_not_implemented(self):
-        """Test that use_mock=False raises NotImplementedError for real API."""
+    def test_use_mock_false_uses_real_api(self):
+        """Test that use_mock=False now uses real API (not raises)."""
         datasource = AkShareDataSource(use_mock=False)
 
-        # Real API not implemented yet in Task 2
-        with pytest.raises(NotImplementedError):
-            datasource.get_fund_basic_info("000001")
-
-        with pytest.raises(NotImplementedError):
-            datasource.get_fund_nav_history("000001")
+        # Real API is now implemented, should NOT raise
+        result = datasource.get_fund_basic_info("000001")
+        assert isinstance(result, dict)
+        assert result["fund_code"] == "000001"

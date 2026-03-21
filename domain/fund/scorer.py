@@ -6,7 +6,7 @@ Phase 2: Upgrade to calculate_score(info, metrics) for full integration.
 """
 from shared.config import SCORE_WEIGHTS_BY_TYPE, DEFAULT_FUND_TYPE
 from shared.logger import get_logger
-from domain.fund.models import FundMetrics, FundScore
+from domain.fund.models import FundInfo, FundMetrics, FundScore
 
 logger = get_logger(__name__)
 
@@ -14,18 +14,25 @@ logger = get_logger(__name__)
 MIN_DATA_COMPLETENESS = 0.5
 
 
-def calculate_score(metrics: FundMetrics, fund_type: str) -> FundScore:
+def calculate_score(
+    metrics: FundMetrics,
+    fund_type: str,
+    info: FundInfo | None = None,  # Phase 2: pass FundInfo for real size/manager scores
+) -> FundScore:
     """Calculate fund comprehensive score.
 
-    MVP Phase 1: Simple scoring using metrics only.
-    - Return, risk, stability dimensions use computed metrics
-    - Cost, size, manager dimensions use placeholder scores (50/100)
+    Phase 2 behaviour:
+    - info=None: all info-dependent dimensions (cost/size/manager) use 50.0 placeholder
+      (backwards-compatible with Phase 1 callers and existing tests)
+    - info provided, field available: real score computed
+    - info provided, field missing (<=0 / empty): None returned → triggers downweight
 
-    Phase 2: Upgrade to use FundInfo for cost/size/manager dimensions.
+    TODO(Phase 3): remove info=None path; require info everywhere.
 
     Args:
         metrics: Fund performance metrics
         fund_type: Fund type (股票型/混合型/债券型/指数型)
+        info: Optional FundInfo for cost/size/manager scoring
 
     Returns:
         FundScore with dimension scores and total score
@@ -40,10 +47,23 @@ def calculate_score(metrics: FundMetrics, fund_type: str) -> FundScore:
     risk_score = _calculate_risk_score(metrics)
     stability_score = _calculate_stability_score(metrics)
 
-    # MVP Phase 1 placeholders - Phase 2 will use FundInfo data
-    cost_score = 50.0  # Placeholder: use actual fee data in Phase 2
-    size_score = 50.0  # Placeholder: use actual fund size in Phase 2
-    manager_score = 50.0  # Placeholder: use manager tenure in Phase 2
+    # cost_score: fee data not yet reliably parsed from akshare → keep placeholder
+    cost_score = 50.0
+
+    # size_score and manager_score: use real data when info is available
+    if info is None:
+        # Backwards-compatible path: preserve Phase 1 placeholder behaviour
+        size_score: float | None = 50.0
+        manager_score: float | None = 50.0
+    else:
+        size_score = (
+            _score_size(info.fund_size) if info.fund_size > 0 else None
+        )
+        manager_score = (
+            _score_manager(info.manager_tenure)
+            if info.manager_name and info.manager_tenure > 0
+            else None
+        )
 
     # Track missing dimensions
     missing_dimensions = []
@@ -90,8 +110,8 @@ def calculate_score(metrics: FundMetrics, fund_type: str) -> FundScore:
         risk_score=round(risk_score, 2) if risk_score else None,
         stability_score=round(stability_score, 2) if stability_score else None,
         cost_score=round(cost_score, 2),
-        size_score=round(size_score, 2),
-        manager_score=round(manager_score, 2),
+        size_score=round(size_score, 2) if size_score is not None else None,
+        manager_score=round(manager_score, 2) if manager_score is not None else None,
         data_completeness=round(data_completeness, 2),
         missing_dimensions=missing_dimensions,
     )
@@ -157,6 +177,60 @@ def _calculate_risk_score(metrics: FundMetrics) -> float | None:
         vol_score = max(0, 15 - (vol - 35) * 0.5)
 
     return dd_score + vol_score
+
+
+def _score_size(fund_size: float) -> float:
+    """Score fund size (亿元) on 0-100 scale.
+
+    Optimal range is 20-100 亿; very small or very large funds are penalised.
+    Breakpoints: <2→10, 2-5→40, 5-20→70, 20-100→100, 100-300→85, >300→70.
+    Values between breakpoints are linearly interpolated.
+    """
+    breakpoints = [
+        (0, 10),
+        (2, 10),
+        (5, 40),
+        (20, 70),
+        (100, 100),
+        (300, 85),
+    ]
+    if fund_size > 300:
+        return 70.0
+    for i in range(len(breakpoints) - 1):
+        x0, y0 = breakpoints[i]
+        x1, y1 = breakpoints[i + 1]
+        if fund_size <= x1:
+            if x1 == x0:
+                return float(y1)
+            t = (fund_size - x0) / (x1 - x0)
+            return y0 + t * (y1 - y0)
+    return 70.0
+
+
+def _score_manager(tenure_years: float) -> float:
+    """Score manager tenure (years) on 0-100 scale.
+
+    Breakpoints: <1→20, 1-3→50, 3-5→75, 5-8→90, >8→100.
+    Values between breakpoints are linearly interpolated.
+    """
+    breakpoints = [
+        (0, 20),
+        (1, 20),
+        (3, 50),
+        (5, 75),
+        (8, 90),
+    ]
+    if tenure_years > 8:
+        return 100.0
+    for i in range(len(breakpoints) - 1):
+        x0, y0 = breakpoints[i]
+        x1, y1 = breakpoints[i + 1]
+        if tenure_years <= x1:
+            if x1 == x0:
+                return float(y1)
+            t = (tenure_years - x0) / (x1 - x0)
+            return y0 + t * (y1 - y0)
+    return 100.0
 
 
 def _calculate_stability_score(metrics: FundMetrics) -> float | None:

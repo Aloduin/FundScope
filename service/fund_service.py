@@ -93,7 +93,7 @@ class FundService:
         metrics = calculate_metrics(nav_history, fund_code)
 
         # 6. Calculate score
-        score = calculate_score(metrics, info.fund_type)
+        score = calculate_score(metrics, info.fund_type, info)
 
         # 7. Save NAV history to Parquet
         self._save_nav_to_parquet(nav_history, fund_code)

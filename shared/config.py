@@ -2,6 +2,9 @@
 from pathlib import Path
 from datetime import date
 
+# Data source configuration
+USE_REAL_DATA = False  # Set to True to use real akshare API
+
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 PARQUET_DIR = DATA_DIR / "parquet"

@@ -12,7 +12,7 @@ from domain.fund.metrics import calculate_metrics
 from domain.fund.scorer import calculate_score
 from domain.fund.classifier import classify_sector
 from shared.logger import get_logger
-from shared.config import DATA_VERSION
+from shared.config import DATA_VERSION, USE_REAL_DATA
 
 logger = get_logger(__name__)
 
@@ -31,8 +31,8 @@ class FundService:
     def __init__(self):
         """Initialize fund service."""
         init_db()  # Ensure database is initialized
-        self.datasource = AkShareDataSource()
-        logger.info("FundService initialized")
+        self.datasource = AkShareDataSource(use_mock=not USE_REAL_DATA)
+        logger.info(f"FundService initialized with USE_REAL_DATA={USE_REAL_DATA}")
 
     def analyze_fund(self, fund_code: str, use_mock: bool = True) -> dict:
         """Analyze a fund end-to-end.

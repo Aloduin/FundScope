@@ -7,6 +7,7 @@ from datetime import date, timedelta
 import numpy as np
 from shared.logger import get_logger
 from .abstract import AbstractDataSource
+from .cache import cached
 
 logger = get_logger(__name__)
 
@@ -35,6 +36,7 @@ class AkShareDataSource(AbstractDataSource):
         else:
             logger.info("使用 Mock 数据模式")
 
+    @cached(key_prefix="fund_info")
     def get_fund_basic_info(self, fund_code: str) -> dict:
         """Get basic fund information.
 
@@ -69,6 +71,7 @@ class AkShareDataSource(AbstractDataSource):
             "subscription_fee": 0.015,
         }
 
+    @cached(key_prefix="nav_history")
     def get_fund_nav_history(
         self,
         fund_code: str,

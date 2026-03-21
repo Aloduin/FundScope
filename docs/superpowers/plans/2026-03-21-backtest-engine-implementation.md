@@ -134,21 +134,18 @@ class TestSignal:
         assert signal.action == "REBALANCE"
         assert signal.target_weight == 0.5
 
-    def test_signal_reason_cannot_be_empty(self):
-        """Test that signal reason cannot be empty."""
-        signal = Signal(
-            date=date(2024, 1, 15),
-            fund_code="000001",
-            action="BUY",
-            confidence=0.5,
-            amount=10000.0,
-            target_weight=None,
-            reason=""
-        )
-
-        # Engine will assert non-empty, but model allows it
-        # This test documents that empty reason is technically possible
-        assert signal.reason == ""
+    def test_signal_reason_required(self):
+        """Test that signal reason is required and cannot be empty."""
+        with pytest.raises(ValueError, match="reason cannot be empty"):
+            Signal(
+                date=date(2024, 1, 15),
+                fund_code="000001",
+                action="BUY",
+                confidence=0.5,
+                amount=10000.0,
+                target_weight=None,
+                reason=""
+            )
 
 
 class TestBacktestResult:
@@ -157,6 +154,7 @@ class TestBacktestResult:
     def test_create_backtest_result(self):
         """Test creating backtest result."""
         from datetime import date
+        from domain.backtest.models import ExecutedTrade
 
         result = BacktestResult(
             strategy_name="DCA",
@@ -165,12 +163,13 @@ class TestBacktestResult:
             end_date=date(2023, 12, 31),
             total_return=0.15,
             annualized_return=0.15,
-            max_drawdown=-0.08,
+            max_drawdown=0.08,  # Positive value for UI display
             sharpe_ratio=1.2,
             win_rate=0.65,
             trade_count=24,
             signals=[],
-            equity_curve=[(date(2023, 1, 1), 100000), (date(2023, 12, 31), 115000)]
+            equity_curve=[(date(2023, 1, 1), 100000), (date(2023, 12, 31), 115000)],
+            executed_trades=[]
         )
 
         assert result.strategy_name == "DCA"
@@ -196,6 +195,28 @@ from typing import Literal
 
 
 @dataclass
+class ExecutedTrade:
+    """Executed trade record.
+
+    Attributes:
+        date: Trade execution date
+        fund_code: Fund code
+        action: BUY or SELL
+        amount: Trade amount in CNY
+        nav: NAV at execution
+        shares: Number of shares traded
+        reason: Trade reason
+    """
+    date: date
+    fund_code: str
+    action: Literal["BUY", "SELL"]
+    amount: float
+    nav: float
+    shares: float
+    reason: str
+
+
+@dataclass
 class Signal:
     """Trading signal from strategy.
 
@@ -206,7 +227,7 @@ class Signal:
         confidence: Signal strength 0.0~1.0
         amount: Trade amount in CNY (for amount-based signals)
         target_weight: Target position weight 0.0~1.0 (for weight-based signals)
-        reason: Decision explanation for interpretability
+        reason: Decision explanation for interpretability (required, cannot be empty)
     """
     date: date
     fund_code: str
@@ -214,13 +235,12 @@ class Signal:
     confidence: float
     amount: float | None = None
     target_weight: float | None = None
-    reason: str = ""
+    reason: str
 
     def __post_init__(self):
         """Validate signal."""
         if not self.reason:
-            # Engine will enforce this, model just documents
-            pass
+            raise ValueError("reason cannot be empty")
         if not 0.0 <= self.confidence <= 1.0:
             raise ValueError(f"confidence must be 0.0~1.0, got {self.confidence}")
 
@@ -236,12 +256,13 @@ class BacktestResult:
         end_date: Backtest end date
         total_return: Total return rate (e.g., 0.15 for 15%)
         annualized_return: Annualized return rate
-        max_drawdown: Maximum drawdown (negative value)
+        max_drawdown: Maximum drawdown (positive value, e.g., 0.08 for 8%)
         sharpe_ratio: Sharpe ratio
         win_rate: Strategy win rate
         trade_count: Total number of trades
         signals: List of all signals generated
         equity_curve: Equity curve [(date, equity), ...]
+        executed_trades: List of executed trades for UI display
     """
     strategy_name: str
     fund_code: str
@@ -255,6 +276,7 @@ class BacktestResult:
     trade_count: int
     signals: list[Signal] = field(default_factory=list)
     equity_curve: list[tuple[date, float]] = field(default_factory=list)
+    executed_trades: list['ExecutedTrade'] = field(default_factory=list)
 ```
 
 - [ ] **Step 6: 运行测试验证通过**
@@ -509,8 +531,8 @@ class TestDCAStrategy:
         for signal in signals:
             assert signal.amount == 5000.0
 
-    def test_dca_first_signal_after_interval(self):
-        """Test DCA first signal comes after interval from start."""
+    def test_dca_first_signal_on_start_date(self):
+        """Test DCA first signal comes on the start date."""
         start_date = date(2023, 1, 1)
         nav_history = generate_mock_nav_history(start_date, periods=45)
 
@@ -518,10 +540,15 @@ class TestDCAStrategy:
         signals = strategy.generate_signals(nav_history)
 
         assert len(signals) >= 2
-        # First signal should be around day 20
+        # First signal should be on or very near start date (day 0)
         first_signal_date = signals[0].date
         days_since_start = (first_signal_date - start_date).days
-        assert 15 <= days_since_start <= 25
+        assert 0 <= days_since_start <= 5  # First investment at start
+
+        # Second signal should be around interval days from first
+        if len(signals) >= 2:
+            second_interval = (signals[1].date - signals[0].date).days
+            assert 15 <= second_interval <= 25
 ```
 
 - [ ] **Step 2: 运行测试验证失败**
@@ -636,17 +663,45 @@ from datetime import date, timedelta
 from domain.backtest.strategies.ma import MAStrategy
 
 
-def generate_trending_nav(start_date: date, periods: int = 100, trend: str = "up") -> list[dict]:
-    """Generate trending NAV history for testing."""
+def generate_golden_cross_nav(start_date: date, periods: int = 100) -> list[dict]:
+    """Generate NAV history with golden cross (falling then rising).
+
+    Creates a scenario where short MA crosses above long MA.
+    """
     nav_history = []
     nav = 1.0
 
     for i in range(periods):
         current_date = start_date + timedelta(days=i)
-        if trend == "up":
-            nav = nav * 1.002  # Upward trend
+        # First half: downtrend, second half: uptrend
+        if i < periods // 2:
+            nav = nav * 0.995  # Falling
         else:
-            nav = nav * 0.998  # Downward trend
+            nav = nav * 1.008  # Rising (stronger to create cross)
+        nav_history.append({
+            "date": current_date,
+            "nav": nav,
+            "acc_nav": nav
+        })
+
+    return nav_history
+
+
+def generate_death_cross_nav(start_date: date, periods: int = 100) -> list[dict]:
+    """Generate NAV history with death cross (rising then falling).
+
+    Creates a scenario where short MA crosses below long MA.
+    """
+    nav_history = []
+    nav = 1.0
+
+    for i in range(periods):
+        current_date = start_date + timedelta(days=i)
+        # First half: uptrend, second half: downtrend
+        if i < periods // 2:
+            nav = nav * 1.005  # Rising
+        else:
+            nav = nav * 0.992  # Falling (stronger to create cross)
         nav_history.append({
             "date": current_date,
             "nav": nav,
@@ -664,34 +719,34 @@ class TestMAStrategy:
         strategy = MAStrategy(short_window=5, long_window=20)
         assert strategy.name() == "MA Timing"
 
-    def test_ma_generates_buy_on_crossover(self):
-        """Test MA generates BUY on bullish crossover."""
+    def test_ma_generates_buy_on_golden_cross(self):
+        """Test MA generates BUY on golden cross."""
         start_date = date(2023, 1, 1)
-        nav_history = generate_trending_nav(start_date, periods=100, trend="up")
+        nav_history = generate_golden_cross_nav(start_date, periods=100)
 
         strategy = MAStrategy(short_window=5, long_window=20)
         signals = strategy.generate_signals(nav_history)
 
-        # Should have at least one BUY signal in uptrend
+        # Should have at least one BUY signal
         buy_signals = [s for s in signals if s.action == "BUY"]
         assert len(buy_signals) >= 1
 
-    def test_ma_generates_sell_on_bearish_crossover(self):
-        """Test MA generates SELL on bearish crossover."""
+    def test_ma_generates_sell_on_death_cross(self):
+        """Test MA generates SELL on death cross."""
         start_date = date(2023, 1, 1)
-        nav_history = generate_trending_nav(start_date, periods=100, trend="down")
+        nav_history = generate_death_cross_nav(start_date, periods=100)
 
         strategy = MAStrategy(short_window=5, long_window=20)
         signals = strategy.generate_signals(nav_history)
 
-        # Should have at least one SELL signal in downtrend
+        # Should have at least one SELL signal
         sell_signals = [s for s in signals if s.action == "SELL"]
         assert len(sell_signals) >= 1
 
     def test_ma_signals_have_explanation(self):
         """Test MA signals have reason explanation."""
         start_date = date(2023, 1, 1)
-        nav_history = generate_trending_nav(start_date, periods=100)
+        nav_history = generate_golden_cross_nav(start_date, periods=100)
 
         strategy = MAStrategy(short_window=5, long_window=20)
         signals = strategy.generate_signals(nav_history)
@@ -703,7 +758,7 @@ class TestMAStrategy:
     def test_ma_confidence_varies_by_signal_strength(self):
         """Test MA confidence varies by how far price is from MA."""
         start_date = date(2023, 1, 1)
-        nav_history = generate_trending_nav(start_date, periods=100)
+        nav_history = generate_golden_cross_nav(start_date, periods=100)
 
         strategy = MAStrategy(short_window=5, long_window=20)
         signals = strategy.generate_signals(nav_history)
@@ -892,7 +947,7 @@ class TestBacktestEngine:
         """Test engine initializes with correct state."""
         engine = BacktestEngine(initial_cash=100000)
         assert engine.initial_cash == 100000
-        assert engine.cash == 100000
+        # Note: cash is internal state during run(), not an instance attribute
 
     def test_engine_runs_dca_strategy(self):
         """Test engine can run DCA strategy."""
@@ -1050,16 +1105,19 @@ class BacktestEngine:
                 if current_date == target_date:
                     # Execute trade
                     if signal.action == "BUY" and signal.amount:
-                        trade_shares = signal.amount / current_nav
-                        shares += trade_shares
-                        cash -= signal.amount
-                        trades.append({
-                            "date": current_date,
-                            "action": "BUY",
-                            "amount": signal.amount,
-                            "nav": current_nav,
-                            "shares": trade_shares
-                        })
+                        # Boundary protection: cannot buy more than available cash
+                        buy_amount = min(signal.amount, cash)
+                        if buy_amount > 0:
+                            trade_shares = buy_amount / current_nav
+                            shares += trade_shares
+                            cash -= buy_amount
+                            trades.append({
+                                "date": current_date,
+                                "action": "BUY",
+                                "amount": buy_amount,
+                                "nav": current_nav,
+                                "shares": trade_shares
+                            })
                     elif signal.action == "SELL":
                         if signal.target_weight is not None:
                             # Sell to target weight
@@ -1068,15 +1126,18 @@ class BacktestEngine:
                         else:
                             shares_to_sell = shares
 
-                        cash += shares_to_sell * current_nav
-                        shares -= shares_to_sell
-                        trades.append({
-                            "date": current_date,
-                            "action": "SELL",
-                            "amount": shares_to_sell * current_nav,
-                            "nav": current_nav,
-                            "shares": shares_to_sell
-                        })
+                        # Boundary protection: cannot sell more than held
+                        shares_to_sell = max(0.0, min(shares_to_sell, shares))
+                        if shares_to_sell > 0:
+                            cash += shares_to_sell * current_nav
+                            shares -= shares_to_sell
+                            trades.append({
+                                "date": current_date,
+                                "action": "SELL",
+                                "amount": shares_to_sell * current_nav,
+                                "nav": current_nav,
+                                "shares": shares_to_sell
+                            })
 
                     pending_order = None
 
@@ -1099,15 +1160,15 @@ class BacktestEngine:
         years = days / 365.25
         annualized_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
 
-        # Max drawdown
+        # Max drawdown (positive value for UI display)
         equity_values = [e[1] for e in equity_curve]
         peak = equity_values[0]
         max_drawdown = 0.0
         for eq in equity_values:
             if eq > peak:
                 peak = eq
-            drawdown = (eq - peak) / peak
-            if drawdown < max_drawdown:
+            drawdown = (peak - eq) / peak  # Positive value
+            if drawdown > max_drawdown:
                 max_drawdown = drawdown
 
         # Daily returns for Sharpe
@@ -1128,6 +1189,21 @@ class BacktestEngine:
         winning_days = sum(1 for r in daily_returns if r > 0)
         win_rate = winning_days / len(daily_returns) if daily_returns else 0
 
+        # Convert trades dict list to ExecutedTrade list
+        from domain.backtest.models import ExecutedTrade
+        executed_trades = [
+            ExecutedTrade(
+                date=t["date"],
+                fund_code=fund_code,
+                action=t["action"],
+                amount=t["amount"],
+                nav=t["nav"],
+                shares=t["shares"],
+                reason="Strategy signal"
+            )
+            for t in trades
+        ]
+
         return BacktestResult(
             strategy_name=strategy.name(),
             fund_code=fund_code,
@@ -1135,12 +1211,13 @@ class BacktestEngine:
             end_date=nav_history[-1]["date"],
             total_return=total_return,
             annualized_return=annualized_return,
-            max_drawdown=max_drawdown,
+            max_drawdown=max_drawdown,  # Positive value
             sharpe_ratio=sharpe_ratio,
             win_rate=win_rate,
             trade_count=len(trades),
             signals=signals,
-            equity_curve=equity_curve
+            equity_curve=equity_curve,
+            executed_trades=executed_trades
         )
 ```
 
@@ -1231,7 +1308,11 @@ from infrastructure.datasource.abstract import AbstractDataSource
 
 
 class BacktestService:
-    """Service for orchestrating backtest operations."""
+    """Service for orchestrating backtest operations.
+
+    Note (Phase 2): Currently uses datasource directly for NAV data.
+    Future: Integrate with Parquet/unified cache layer.
+    """
 
     def __init__(self, datasource: AbstractDataSource = None):
         """Initialize backtest service.

@@ -266,6 +266,19 @@ def parse_csv(file_content: bytes) -> CsvImportResult:
 
 
 # ---------------------------------------------------------------------------
+# Public class interface
+# ---------------------------------------------------------------------------
+
+
+class CsvImporter:
+    """Thin wrapper around parse_csv for class-based call sites."""
+
+    @staticmethod
+    def from_bytes(file_content: bytes) -> CsvImportResult:
+        return parse_csv(file_content)
+
+
+# ---------------------------------------------------------------------------
 # Merge helper
 # ---------------------------------------------------------------------------
 

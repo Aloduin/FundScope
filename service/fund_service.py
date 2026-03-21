@@ -12,6 +12,7 @@ from domain.fund.metrics import calculate_metrics
 from domain.fund.scorer import calculate_score
 from domain.fund.classifier import classify_sector
 from shared.logger import get_logger
+from shared.config import DATA_VERSION
 
 logger = get_logger(__name__)
 
@@ -33,11 +34,12 @@ class FundService:
         self.datasource = AkShareDataSource()
         logger.info("FundService initialized")
 
-    def analyze_fund(self, fund_code: str) -> dict:
+    def analyze_fund(self, fund_code: str, use_mock: bool = True) -> dict:
         """Analyze a fund end-to-end.
 
         Args:
             fund_code: Fund code (e.g., '000001')
+            use_mock: If True, use mock data. If False, use real akshare API.
 
         Returns:
             Dict containing:
@@ -76,7 +78,7 @@ class FundService:
             management_fee=basic_info.get("management_fee", 0.0),
             custodian_fee=basic_info.get("custodian_fee", 0.0),
             subscription_fee=basic_info.get("subscription_fee", 0.0),
-            data_version=date.today().strftime("%Y%m%d"),
+            data_version=DATA_VERSION,
         )
 
         # 5. Calculate metrics
@@ -85,7 +87,10 @@ class FundService:
         # 6. Calculate score
         score = calculate_score(metrics, info.fund_type)
 
-        # 7. Persist to database
+        # 7. Save NAV history to Parquet
+        self._save_nav_to_parquet(nav_history, fund_code)
+
+        # 8. Persist to database
         self._persist_fund_info(info)
         self._persist_fund_score(score)
 
@@ -97,6 +102,25 @@ class FundService:
             "sectors": sectors,
             "sector_source": sector_source,
         }
+
+    def _save_nav_to_parquet(
+        self,
+        nav_history: list[dict],
+        fund_code: str
+    ) -> None:
+        """Save NAV history to Parquet file.
+
+        Args:
+            nav_history: List of dicts with keys [date, nav, acc_nav]
+            fund_code: Fund code
+        """
+        if not nav_history:
+            logger.warning(f"No NAV data to save for {fund_code}")
+            return
+
+        parquet_store = ParquetStore(fund_code)
+        parquet_store.write_nav_data(nav_history, DATA_VERSION)
+        logger.info(f"Saved NAV history to Parquet for {fund_code}")
 
     def _persist_fund_info(self, info: FundInfo) -> None:
         """Persist FundInfo to SQLite."""

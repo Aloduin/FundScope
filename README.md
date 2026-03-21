@@ -274,6 +274,19 @@ uv run pytest --cov=. --cov-report=html
 - 表：`fund_info, fund_score, portfolio, trade_record, virtual_account` 等
 - 所有表有主键和索引
 
+### 数据源配置
+
+默认使用 mock 数据。切换到真实 akshare 数据：
+
+1. 编辑 `shared/config.py`
+2. 设置 `USE_REAL_DATA = True`
+3. 重启应用
+
+**注意：**
+- 若真实 API 调用失败，系统会自动回退到 mock 数据
+- 建议首次启用时先测试单只基金（如 `000001`）
+- 首次拉取真实数据可能较慢，请耐心等待
+
 ---
 
 ## 🔧 开发指南

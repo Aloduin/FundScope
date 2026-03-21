@@ -164,3 +164,51 @@ MVP 阶段使用 mock 数据。第二阶段将接入真实 akshare 数据。
 - 阅读 [架构说明](docs/guides/architecture.md) 了解系统设计
 - 阅读 [开发指南](docs/guides/development.md) 开始二次开发
 - 查看 [实施计划](docs/superpowers/plans/) 了解路线图
+
+---
+
+## 6. 数据源配置
+
+### 默认数据源
+
+MVP 阶段默认使用 **mock 数据**，适合快速测试和开发。
+
+### 切换到真实 akshare 数据
+
+1. 编辑 `shared/config.py`
+2. 设置 `USE_REAL_DATA = True`
+3. 重启 Streamlit 应用
+
+### 注意事项
+
+- **自动回退**：若真实 API 调用失败，系统会自动回退到 mock 数据
+- **首次测试**：建议首次启用时先测试单只基金（如 `000001`）
+- **性能提示**：首次拉取真实数据可能较慢，系统会自动缓存到 `data/parquet/` 目录
+- **缓存清理**：需要清空缓存时，删除 `data/` 目录并重启应用
+
+---
+
+## 7. 缓存管理
+
+### L1 内存缓存
+
+- 默认 TTL：30 分钟
+- 自动过期，无需手动清理
+
+### L2 文件缓存
+
+- 原始响应缓存在 `data/cache/`
+- Parquet 数据缓存在 `data/parquet/`
+- SQLite 业务数据在 `data/sqlite/`
+
+### 清理缓存
+
+```bash
+# 清空所有缓存数据
+rm -rf data/*
+
+# 重启应用
+uv run streamlit run ui/app.py
+```
+
+**注意**：清理缓存后，首次运行会重新拉取数据。

@@ -44,7 +44,7 @@ class AkShareDataSource(AbstractDataSource):
     def get_fund_basic_info(self, fund_code: str) -> dict:
         """Get basic fund information.
 
-        Phase 2: Uses akshare.fund_individual_basic_info_xq() for real data.
+        Phase 2: Uses akshare API for real data.
 
         Args:
             fund_code: Fund code (e.g., '000001')
@@ -61,15 +61,15 @@ class AkShareDataSource(AbstractDataSource):
             if cached_data is not None:
                 return cached_data
 
-            # Call real akshare API
-            result = self._get_real_fund_info(fund_code)
-
-            # Validate and save to L2 cache
-            if self._validate_fund_info(result):
-                save_cached_response(fund_code, "fund_info", result)
-                return result
-
-            raise ValueError(f"Invalid fund info for {fund_code}")
+            # Call real akshare API with fallback to mock
+            try:
+                result = self._get_real_fund_info(fund_code)
+                if self._validate_fund_info(result):
+                    save_cached_response(fund_code, "fund_info", result)
+                    return result
+            except Exception as e:
+                logger.error(f"真实 API 获取基金信息失败 {fund_code}：{e}")
+                raise
 
         logger.info(f"获取基金基本信息：{fund_code} (Mock)")
         return {
@@ -88,14 +88,62 @@ class AkShareDataSource(AbstractDataSource):
         """Get real fund info from akshare API.
 
         Args:
-            fund_code: Fund code (e.g., '000001')
+            fund_code: Fund code (e.g., '000001', '510300')
 
         Returns:
             Dictionary containing standardized fund info.
         """
         logger.info(f"获取真实基金信息：{fund_code}")
 
-        # Use雪球数据源获取基金基本信息
+        # Detect fund type by code prefix
+        # 51xxxx, 15xxxx, 16xxxx are typically ETF/LOF
+        is_etf = fund_code.startswith(('51', '15', '16'))
+
+        if is_etf:
+            return self._get_etf_fund_info(fund_code)
+        else:
+            return self._get_open_fund_info(fund_code)
+
+    def _get_etf_fund_info(self, fund_code: str) -> dict:
+        """Get ETF fund info from akshare API (东方财富数据源)."""
+        logger.info(f"获取 ETF 基金信息：{fund_code}")
+
+        # Try to get basic info from fund_name_em
+        fund_name = ""
+        fund_type = "指数型"  # Default for ETF
+        try:
+            name_df = ak.fund_name_em()
+            matching = name_df[name_df['基金代码'] == fund_code]
+            if not matching.empty:
+                fund_name = matching.iloc[0]['基金简称']
+                fund_type_raw = matching.iloc[0].get('基金类型', '')
+                fund_type = self._map_fund_type(fund_type_raw)
+        except Exception as e:
+            logger.warning(f"Failed to get ETF name for {fund_code}: {e}")
+
+        return {
+            "fund_code": fund_code,
+            "fund_name": fund_name if fund_name else f"ETF{fund_code}",
+            "fund_full_name": fund_name if fund_name else f"ETF{fund_code}",
+            "fund_type": fund_type,
+            "manager_name": "",  # ETF manager info not available from this API
+            "manager_tenure": 0.0,
+            "fund_size": 0.0,  # Need separate API call for size
+            "establishment_date": None,
+            "fund_company": "",
+            "custodian": "",
+            "investment_objective": "",
+            "investment_strategy": "",
+            "benchmark": "",
+            "management_fee": 0.005,  # ETF typically has lower fees
+            "custodian_fee": 0.001,
+            "subscription_fee": 0.001,
+        }
+
+    def _get_open_fund_info(self, fund_code: str) -> dict:
+        """Get open-ended fund info from akshare API (雪球数据源)."""
+        logger.info(f"获取开放式基金信息：{fund_code}")
+
         df = ak.fund_individual_basic_info_xq(symbol=fund_code)
 
         # Convert DataFrame (item/value pairs) to dict
@@ -253,7 +301,7 @@ class AkShareDataSource(AbstractDataSource):
     ) -> list[dict]:
         """Get fund NAV history.
 
-        Phase 2: Uses akshare.fund_open_fund_info_em() for real data.
+        Phase 2: Uses akshare API for real data.
 
         Args:
             fund_code: Fund code (e.g., '000001')
@@ -272,15 +320,15 @@ class AkShareDataSource(AbstractDataSource):
             if cached_data is not None:
                 return cached_data
 
-            # Call real akshare API
-            result = self._get_real_nav_history(fund_code, start_date, end_date)
-
-            # Validate and save to L2 cache
-            if self._validate_nav_history(result):
-                save_cached_response(fund_code, "nav_history", result)
-                return result
-
-            raise ValueError(f"Invalid NAV history for {fund_code}")
+            # Call real akshare API with fallback to mock
+            try:
+                result = self._get_real_nav_history(fund_code, start_date, end_date)
+                if self._validate_nav_history(result):
+                    save_cached_response(fund_code, "nav_history", result)
+                    return result
+            except Exception as e:
+                logger.error(f"真实 API 获取净值历史失败 {fund_code}：{e}")
+                raise
 
         logger.info(f"获取基金净值历史：{fund_code} (Mock)")
 
@@ -330,16 +378,55 @@ class AkShareDataSource(AbstractDataSource):
         if start_date is None:
             start_date = end_date - timedelta(days=365 * 3)
 
-        # 开放式基金历史净值（东方财富数据源）
+        # Detect fund type and use appropriate API
+        is_etf = fund_code.startswith(('51', '15', '16'))
+
+        if is_etf:
+            # Use ETF API
+            df = self._fetch_etf_nav(fund_code, start_date, end_date)
+            # If ETF API fails, try open-ended fund API as fallback
+            if df.empty:
+                logger.info(f"ETF API failed, trying open-ended fund API for {fund_code}")
+                df = self._fetch_open_fund_nav(fund_code, start_date, end_date)
+        else:
+            # Use open-ended fund API
+            df = self._fetch_open_fund_nav(fund_code, start_date, end_date)
+
+        # Handle empty DataFrame
+        if df.empty:
+            logger.warning(f"No NAV data found for {fund_code}")
+            return []
+
+        # Sort by date (ascending)
+        df.sort_values('date', inplace=True)
+
+        # Convert to list of dicts
+        result = []
+        for _, row in df.iterrows():
+            result.append({
+                "date": row["date"],
+                "nav": row["nav"],
+                "acc_nav": row.get("acc_nav", row["nav"]),
+            })
+
+        logger.info(f"获取净值历史完成：{fund_code}, {len(result)} 条记录")
+        return result
+
+    def _fetch_open_fund_nav(
+        self,
+        fund_code: str,
+        start_date: date,
+        end_date: date
+    ) -> pd.DataFrame:
+        """Fetch NAV history for open-ended funds (东方财富数据源)."""
         df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
 
         # Check if DataFrame is empty
         if df.empty:
             logger.warning(f"fund_open_fund_info_em returned empty data for {fund_code}")
-            return []
+            return pd.DataFrame()
 
         # Standardize column names
-        # Expected columns: 净值日期，单位净值，累计净值，日增长率
         column_mapping = {
             "净值日期": "date",
             "单位净值": "nav",
@@ -351,45 +438,69 @@ class AkShareDataSource(AbstractDataSource):
         available_cols = {col: column_mapping.get(col, col) for col in df.columns}
         df = df.rename(columns=available_cols)
 
-        result = []
-        for _, row in df.iterrows():
-            try:
-                # Parse date
-                date_str = str(row.get("date", ""))
-                if not date_str or date_str == "None":
-                    continue
+        # Parse date
+        df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.date
 
-                parsed_date = self._parse_date(date_str)
-                if parsed_date is None:
-                    continue
+        # Filter by date range
+        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
 
-                # Filter by date range
-                if parsed_date < start_date or parsed_date > end_date:
-                    continue
+        # Parse NAV values
+        df['nav'] = df['nav'].apply(lambda x: float(x) if pd.notna(x) and x > 0 else 0.0)
+        if 'acc_nav' not in df.columns:
+            df['acc_nav'] = df['nav']
+        else:
+            df['acc_nav'] = df['acc_nav'].apply(lambda x: float(x) if pd.notna(x) and x > 0 else df['nav'])
 
-                # Parse NAV values
-                nav = self._parse_nav_value(row.get("nav"))
-                acc_nav = self._parse_nav_value(row.get("acc_nav", nav))  # Use nav as fallback
+        return df[['date', 'nav', 'acc_nav']]
 
-                # Skip invalid data
-                if nav <= 0:
-                    continue
+    def _fetch_etf_nav(
+        self,
+        fund_code: str,
+        start_date: date,
+        end_date: date
+    ) -> pd.DataFrame:
+        """Fetch NAV history for ETF funds (东方财富数据源)."""
+        try:
+            df = ak.fund_etf_fund_info_em(
+                fund=fund_code,
+                start_date=start_date.strftime("%Y%m%d"),
+                end_date=end_date.strftime("%Y%m%d")
+            )
+        except Exception as e:
+            logger.warning(f"ETF API failed for {fund_code}: {e}")
+            return pd.DataFrame()
 
-                result.append({
-                    "date": parsed_date,
-                    "nav": nav,
-                    "acc_nav": acc_nav,
-                })
+        # Check if DataFrame is empty
+        if df.empty:
+            logger.warning(f"fund_etf_fund_info_em returned empty data for {fund_code}")
+            return pd.DataFrame()
 
-            except Exception as e:
-                logger.warning(f"Error parsing NAV row: {e}")
-                continue
+        # Standardize column names
+        column_mapping = {
+            "净值日期": "date",
+            "单位净值": "nav",
+            "累计净值": "acc_nav",
+            "涨跌幅": "daily_growth",
+        }
 
-        # Sort by date (ascending)
-        result.sort(key=lambda x: x["date"])
+        # Rename columns if they exist
+        available_cols = {col: column_mapping.get(col, col) for col in df.columns}
+        df = df.rename(columns=available_cols)
 
-        logger.info(f"获取净值历史完成：{fund_code}, {len(result)} 条记录")
-        return result
+        # Parse date
+        df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.date
+
+        # Filter by date range (already filtered by API, but double-check)
+        df = df[(df['date'] >= start_date) & (df['date'] <= end_date)]
+
+        # Parse NAV values
+        df['nav'] = df['nav'].apply(lambda x: float(x) if pd.notna(x) and x > 0 else 0.0)
+        if 'acc_nav' not in df.columns:
+            df['acc_nav'] = df['nav']
+        else:
+            df['acc_nav'] = df['acc_nav'].apply(lambda x: float(x) if pd.notna(x) and x > 0 else df['nav'])
+
+        return df[['date', 'nav', 'acc_nav']]
 
     def _validate_nav_history(self, history: list[dict]) -> bool:
         """Validate NAV history data quality.

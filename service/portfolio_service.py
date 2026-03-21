@@ -91,9 +91,6 @@ class PortfolioService:
         conn.close()
 
         if row is None:
-            # If fund not in database, use classifier
-            cursor2 = conn.cursor()
-            cursor2.execute("SELECT fund_name FROM fund_info WHERE fund_code = ?", (fund_code,))
             return []
 
         return json.loads(row["sectors"]) if row["sectors"] else []

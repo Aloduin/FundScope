@@ -34,12 +34,13 @@ class FundService:
         self.datasource = AkShareDataSource(use_mock=not USE_REAL_DATA)
         logger.info(f"FundService initialized with USE_REAL_DATA={USE_REAL_DATA}")
 
-    def analyze_fund(self, fund_code: str, use_mock: bool = True) -> dict:
+    def analyze_fund(self, fund_code: str, use_mock: bool = None) -> dict:
         """Analyze a fund end-to-end.
 
         Args:
             fund_code: Fund code (e.g., '000001')
             use_mock: If True, use mock data. If False, use real akshare API.
+                      If None, uses USE_REAL_DATA config setting.
 
         Returns:
             Dict containing:
@@ -52,11 +53,18 @@ class FundService:
         """
         logger.info(f"Analyzing fund: {fund_code}")
 
+        # Use provided use_mock or fall back to config
+        if use_mock is not None:
+            # Temporarily override datasource for this call
+            datasource = AkShareDataSource(use_mock=use_mock)
+        else:
+            datasource = self.datasource
+
         # 1. Get basic info
-        basic_info = self.datasource.get_fund_basic_info(fund_code)
+        basic_info = datasource.get_fund_basic_info(fund_code)
 
         # 2. Get NAV history
-        nav_history = self.datasource.get_fund_nav_history(fund_code)
+        nav_history = datasource.get_fund_nav_history(fund_code)
 
         # 3. Classify sector
         primary_sector, sectors, sector_source = classify_sector(

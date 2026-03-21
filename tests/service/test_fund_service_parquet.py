@@ -31,7 +31,7 @@ class TestFundServiceParquetPersistence:
             parquet_file.unlink()
 
         # Analyze fund
-        result = self.service.analyze_fund(fund_code)
+        result = self.service.analyze_fund(fund_code, use_mock=True)
 
         # Check Parquet file was created
         assert parquet_file.exists(), f"Parquet file should be created for {fund_code}"
@@ -41,7 +41,7 @@ class TestFundServiceParquetPersistence:
         fund_code = "000001"
 
         # Analyze fund
-        result = self.service.analyze_fund(fund_code)
+        result = self.service.analyze_fund(fund_code, use_mock=True)
 
         # Read back from Parquet
         store = ParquetStore(fund_code)
@@ -60,7 +60,7 @@ class TestFundServiceParquetPersistence:
         fund_code = "000001"
 
         # Analyze fund
-        result = self.service.analyze_fund(fund_code)
+        result = self.service.analyze_fund(fund_code, use_mock=True)
 
         # Read back from Parquet
         store = ParquetStore(fund_code)
@@ -73,7 +73,7 @@ class TestFundServiceParquetPersistence:
     def test_get_fund_score_after_analyze(self):
         """Test get_fund_score returns data after analyze."""
         # First analyze
-        self.service.analyze_fund("000002")
+        self.service.analyze_fund("000002", use_mock=True)
 
         # Then retrieve from SQLite
         info = self.service.get_fund_info("000002")

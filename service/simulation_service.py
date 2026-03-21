@@ -1,0 +1,259 @@
+"""Simulation service orchestration.
+
+Orchestrates virtual account operations.
+"""
+import json
+from datetime import date
+from infrastructure.storage.sqlite_store import init_db, get_connection
+from domain.simulation.models import VirtualAccount, Trade
+from domain.simulation.account import buy, sell
+from shared.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class SimulationService:
+    """Simulation service for virtual account operations.
+
+    Orchestrates:
+    1. Account creation
+    2. Buy/sell operations
+    3. Position and trade persistence
+    """
+
+    def __init__(self):
+        """Initialize simulation service."""
+        init_db()  # Ensure database is initialized
+        logger.info("SimulationService initialized")
+
+    def create_account(self, account_id: str, initial_cash: float) -> VirtualAccount:
+        """Create a new virtual account.
+
+        Args:
+            account_id: Account identifier
+            initial_cash: Initial cash amount
+
+        Returns:
+            VirtualAccount
+        """
+        logger.info(f"Creating account: {account_id} with {initial_cash}")
+
+        account = VirtualAccount(
+            account_id=account_id,
+            initial_cash=initial_cash,
+            cash=initial_cash,
+        )
+
+        # Persist to database
+        self._persist_account(account)
+
+        return account
+
+    def get_account(self, account_id: str) -> VirtualAccount | None:
+        """Get account from database.
+
+        Args:
+            account_id: Account identifier
+
+        Returns:
+            VirtualAccount or None if not found
+        """
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Get account header
+        cursor.execute("SELECT * FROM virtual_account WHERE account_id = ?", (account_id,))
+        row = cursor.fetchone()
+
+        if row is None:
+            conn.close()
+            return None
+
+        # Get positions
+        cursor.execute("SELECT * FROM virtual_account_position WHERE account_id = ?", (account_id,))
+        positions = [dict(row) for row in cursor.fetchall()]
+
+        # Get trades
+        cursor.execute("SELECT * FROM trade_record WHERE account_id = ? ORDER BY trade_date", (account_id,))
+        trades = [dict(row) for row in cursor.fetchall()]
+
+        conn.close()
+
+        # Reconstruct account
+        account = VirtualAccount(
+            account_id=row["account_id"],
+            initial_cash=row["initial_cash"],
+            cash=row["cash"],
+            positions=positions,
+            trades=[],  # Will reconstruct from trade records
+        )
+
+        # Reconstruct trades
+        for t in trades:
+            account.trades.append(Trade(
+                trade_id=t["trade_id"],
+                account_id=t["account_id"],
+                fund_code=t["fund_code"],
+                action=t["action"],
+                amount=t["amount"],
+                nav=t["nav"],
+                shares=t["shares"],
+                trade_date=date.fromisoformat(t["trade_date"]) if isinstance(t["trade_date"], str) else t["trade_date"],
+                reason=t.get("reason", ""),
+            ))
+
+        return account
+
+    def execute_buy(
+        self,
+        account_id: str,
+        fund_code: str,
+        fund_name: str,
+        amount: float,
+        nav: float,
+        trade_date: date | None = None,
+        reason: str = ""
+    ) -> Trade:
+        """Execute a buy order.
+
+        Args:
+            account_id: Account identifier
+            fund_code: Fund code to buy
+            fund_name: Fund name
+            amount: Amount to invest
+            nav: Execution net value
+            trade_date: Trade date (default: today)
+            reason: Trade reason
+
+        Returns:
+            Trade record
+
+        Raises:
+            ValueError: If account not found or insufficient cash
+        """
+        logger.info(f"Executing BUY: {account_id} buying {fund_code}")
+
+        # Get account
+        account = self.get_account(account_id)
+        if account is None:
+            raise ValueError(f"Account not found: {account_id}")
+
+        # Execute buy
+        trade = buy(account, fund_code, fund_name, amount, nav, trade_date, reason)
+
+        # Persist updates
+        self._update_account(account, trade)
+
+        return trade
+
+    def execute_sell(
+        self,
+        account_id: str,
+        fund_code: str,
+        fund_name: str,
+        amount: float,
+        nav: float,
+        trade_date: date | None = None,
+        reason: str = ""
+    ) -> Trade:
+        """Execute a sell order.
+
+        Args:
+            account_id: Account identifier
+            fund_code: Fund code to sell
+            fund_name: Fund name
+            amount: Amount to sell
+            nav: Execution net value
+            trade_date: Trade date (default: today)
+            reason: Trade reason
+
+        Returns:
+            Trade record
+
+        Raises:
+            ValueError: If account not found or insufficient position
+        """
+        logger.info(f"Executing SELL: {account_id} selling {fund_code}")
+
+        # Get account
+        account = self.get_account(account_id)
+        if account is None:
+            raise ValueError(f"Account not found: {account_id}")
+
+        # Execute sell
+        trade = sell(account, fund_code, fund_name, amount, nav, trade_date, reason)
+
+        # Persist updates
+        self._update_account(account, trade)
+
+        return trade
+
+    def _persist_account(self, account: VirtualAccount) -> None:
+        """Persist new account to SQLite."""
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            INSERT OR REPLACE INTO virtual_account (account_id, initial_cash, cash, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (account.account_id, account.initial_cash, account.cash, account.created_at.isoformat()))
+
+        conn.commit()
+        conn.close()
+        logger.debug(f"Persisted account {account.account_id}")
+
+    def _update_account(self, account: VirtualAccount, trade: Trade) -> None:
+        """Update account in SQLite after trade.
+
+        Updates:
+        - Account cash
+        - Positions (full rewrite)
+        - Trades (append only)
+        """
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Update account cash
+        cursor.execute("""
+            UPDATE virtual_account SET cash = ? WHERE account_id = ?
+        """, (account.cash, account.account_id))
+
+        # Delete and rewrite positions
+        cursor.execute("DELETE FROM virtual_account_position WHERE account_id = ?", (account.account_id,))
+
+        for pos in account.positions:
+            if isinstance(pos, dict):
+                cursor.execute("""
+                    INSERT INTO virtual_account_position (
+                        account_id, fund_code, fund_name, amount, weight, shares, cost_nav
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    account.account_id,
+                    pos["fund_code"],
+                    pos.get("fund_name", ""),
+                    pos["amount"],
+                    pos.get("weight", 0.0),
+                    pos.get("shares"),
+                    pos.get("cost_nav"),
+                ))
+
+        # Append trade (only the new one)
+        cursor.execute("""
+            INSERT INTO trade_record (
+                trade_id, account_id, fund_code, action, amount, nav, shares, trade_date, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            trade.trade_id,
+            trade.account_id,
+            trade.fund_code,
+            trade.action,
+            trade.amount,
+            trade.nav,
+            trade.shares,
+            trade.trade_date.isoformat() if trade.trade_date else date.today().isoformat(),
+            trade.reason,
+        ))
+
+        conn.commit()
+        conn.close()
+        logger.debug(f"Updated account {account.account_id} with trade {trade.trade_id}")

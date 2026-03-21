@@ -8,6 +8,7 @@ import numpy as np
 from shared.logger import get_logger
 from .abstract import AbstractDataSource
 from .cache import cached
+from .raw_cache import load_cached_response, save_cached_response
 
 logger = get_logger(__name__)
 
@@ -40,7 +41,7 @@ class AkShareDataSource(AbstractDataSource):
     def get_fund_basic_info(self, fund_code: str) -> dict:
         """Get basic fund information.
 
-        Phase 2: Replace with akshare.fund_open_fund_info_em() calls.
+        Phase 2: Replace with akshare.fund_individual_basic_info_xq() calls.
 
         Args:
             fund_code: Fund code (e.g., '000001')
@@ -50,8 +51,23 @@ class AkShareDataSource(AbstractDataSource):
 
         Raises:
             NotImplementedError: If use_mock is False (real API not implemented).
+
+        Task 6 TODO:
+        ```python
+        import akshare as ak
+
+        # 使用雪球数据源获取基金基本信息
+        df = ak.fund_individual_basic_info_xq(symbol=fund_code)
+        # 返回 DataFrame，需要转换为 dict
+        # 包含：基金代码、基金名称、成立时间、基金规模、基金公司、基金经理等
+        ```
         """
         if not self.use_mock:
+            # Check L2 cache first
+            cached_data = load_cached_response(fund_code, "fund_info")
+            if cached_data is not None:
+                return cached_data
+
             # Task 6: Implement real akshare API call
             raise NotImplementedError(
                 "Real akshare API for get_fund_basic_info not implemented yet. "
@@ -80,7 +96,7 @@ class AkShareDataSource(AbstractDataSource):
     ) -> list[dict]:
         """Get fund NAV history.
 
-        Phase 2: Replace with akshare.fund_open_fund_daily_em() calls.
+        Phase 2: Replace with akshare.fund_open_fund_info_em() calls.
 
         Args:
             fund_code: Fund code (e.g., '000001')
@@ -92,8 +108,30 @@ class AkShareDataSource(AbstractDataSource):
 
         Raises:
             NotImplementedError: If use_mock is False (real API not implemented).
+
+        Task 6 TODO:
+        ```python
+        import akshare as ak
+
+        # 开放式基金历史净值（东方财富数据源）
+        df = ak.fund_open_fund_info_em(symbol=fund_code, indicator="单位净值走势")
+        # 返回 DataFrame，包含：净值日期、单位净值、日增长率
+
+        # 或者 ETF/LOF 基金历史净值
+        df = ak.fund_etf_fund_info_em(
+            fund=fund_code,
+            start_date=start_date.strftime("%Y%m%d"),
+            end_date=end_date.strftime("%Y%m%d")
+        )
+        # 返回 DataFrame，包含：净值日期、单位净值、累计净值、涨跌幅、申购状态、赎回状态
+        ```
         """
         if not self.use_mock:
+            # Check L2 cache first
+            cached_data = load_cached_response(fund_code, "nav_history")
+            if cached_data is not None:
+                return cached_data
+
             # Task 6: Implement real akshare API call
             raise NotImplementedError(
                 "Real akshare API for get_fund_nav_history not implemented yet. "

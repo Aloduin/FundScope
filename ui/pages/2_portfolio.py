@@ -1,6 +1,7 @@
 """Portfolio Diagnosis Page - Enter holdings, analyze concentration, get suggestions."""
 import streamlit as st
 from service.portfolio_service import PortfolioService
+from infrastructure.importer.csv_importer import CsvImporter
 
 st.set_page_config(
     page_title="持仓诊断 - FundScope",
@@ -21,8 +22,79 @@ service = get_portfolio_service()
 if "holdings" not in st.session_state:
     st.session_state.holdings = []
 
+# ---------------------------------------------------------------------------
+# CSV Import Section
+# ---------------------------------------------------------------------------
+st.subheader("📂 批量导入持仓（CSV）")
+
+with st.expander("从 CSV 文件导入持仓", expanded=False):
+    st.markdown(
+        "支持 **支付宝**、**天天基金** 导出格式，以及含 `fund_code / fund_name / amount` 列的标准格式。"
+    )
+    uploaded_file = st.file_uploader(
+        "选择 CSV 文件",
+        type=["csv"],
+        key="csv_upload",
+        help="文件编码自动识别（UTF-8 / GBK / GB18030）",
+    )
+
+    if uploaded_file is not None:
+        raw_bytes = uploaded_file.read()
+        try:
+            result = CsvImporter.from_bytes(raw_bytes)
+        except Exception as exc:
+            st.error(f"解析失败：{exc}")
+            result = None
+
+        if result is not None:
+            st.caption(f"识别格式：`{result.source_type}`　有效行：{len(result.valid_rows)}　跳过行：{len(result.skipped_rows)}")
+
+            # Warnings
+            for w in result.warnings:
+                st.warning(w)
+
+            # Preview merged rows
+            if result.merged_rows:
+                import pandas as _pd
+                preview_df = _pd.DataFrame(result.merged_rows)[["fund_code", "fund_name", "amount"]]
+                preview_df.columns = ["基金代码", "基金名称", "金额 (元)"]
+                preview_df["金额 (元)"] = preview_df["金额 (元)"].map(lambda x: f"{x:,.2f}")
+                st.dataframe(preview_df, use_container_width=True)
+
+                if st.button("导入到当前持仓", type="primary", key="btn_import_csv"):
+                    imported = 0
+                    for row in result.merged_rows:
+                        # Avoid duplicates — update amount if code already exists
+                        existing = next(
+                            (h for h in st.session_state.holdings if h["fund_code"] == row["fund_code"]),
+                            None,
+                        )
+                        if existing is None:
+                            st.session_state.holdings.append({
+                                "fund_code": row["fund_code"],
+                                "fund_name": row["fund_name"],
+                                "amount": row["amount"],
+                            })
+                            imported += 1
+                        else:
+                            existing["amount"] = row["amount"]
+                            existing["fund_name"] = row["fund_name"] or existing["fund_name"]
+                            imported += 1
+                    st.success(f"已导入 {imported} 条持仓记录")
+                    st.rerun()
+            else:
+                st.info("未解析到有效持仓行。")
+
+            # Skipped rows detail
+            if result.skipped_rows:
+                with st.expander(f"查看跳过的行（共 {len(result.skipped_rows)} 行）"):
+                    for item in result.skipped_rows:
+                        st.text(f"原因：{item['reason']}　原始数据：{item['raw_row']}")
+
+st.divider()
+
 # Input form
-st.subheader("添加持仓")
+st.subheader("✏️ 手动添加持仓")
 col1, col2, col3, col4 = st.columns([2, 3, 2, 1])
 with col1:
     fund_code = st.text_input("基金代码", key="input_code", max_chars=6)

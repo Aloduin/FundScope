@@ -3,8 +3,10 @@ from datetime import date
 from domain.backtest.engine import BacktestEngine
 from domain.backtest.models import BacktestResult
 from domain.backtest.strategies.base import Strategy
+from domain.backtest.strategies.composite import CompositeStrategy
 from domain.backtest.strategies.dca import DCAStrategy
 from domain.backtest.strategies.ma import MAStrategy
+from domain.backtest.strategies.modifiers.ma_filter import MAFilter
 from infrastructure.datasource.akshare_source import AkShareDataSource
 from infrastructure.datasource.abstract import AbstractDataSource
 
@@ -29,6 +31,18 @@ class BacktestService:
             return MAStrategy(
                 short_window=params.get("short_window", 5),
                 long_window=params.get("long_window", 20)
+            )
+        elif strategy_name == "DCA + MA Filter":
+            dca = DCAStrategy(
+                invest_amount=params.get("invest_amount", 10000),
+                invest_interval_days=params.get("interval_days", 20),
+            )
+            ma_filter = MAFilter(
+                window=params.get("ma_window", 20)
+            )
+            return CompositeStrategy(
+                primary_strategy=dca,
+                modifier=ma_filter,
             )
         else:
             raise ValueError(f"Unknown strategy: {strategy_name}")

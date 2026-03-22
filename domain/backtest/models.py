@@ -43,6 +43,14 @@ class SignalContext:
 
 
 @dataclass
+class BlockedSignalTrace:
+    """Trace record for a blocked signal."""
+    original: Signal
+    modifier: str
+    reason: str
+
+
+@dataclass
 class BacktestResult:
     """Backtest result summary."""
     strategy_name: str
@@ -58,3 +66,4 @@ class BacktestResult:
     signals: list[Signal] = field(default_factory=list)
     equity_curve: list[tuple[date, float]] = field(default_factory=list)
     executed_trades: list[ExecutedTrade] = field(default_factory=list)
+    blocked_signals: list[BlockedSignalTrace] = field(default_factory=list)

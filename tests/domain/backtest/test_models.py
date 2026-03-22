@@ -167,3 +167,45 @@ class TestBacktestResult:
         assert result.sharpe_ratio == 1.2
         assert result.max_drawdown == 0.08
         assert len(result.equity_curve) == 2
+
+
+class TestBlockedSignalTrace:
+    """Tests for BlockedSignalTrace dataclass."""
+
+    def test_blocked_signal_trace_creation(self):
+        from domain.backtest.models import Signal, BlockedSignalTrace
+
+        signal = Signal(
+            date=date(2023, 6, 15),
+            fund_code="000001",
+            action="BUY",
+            confidence=0.7,
+            reason="test buy"
+        )
+        trace = BlockedSignalTrace(
+            original=signal,
+            modifier="MAFilter(20, trend_confirm)",
+            reason="买入信号被拦截：当前净值低于20日均线"
+        )
+
+        assert trace.original == signal
+        assert trace.modifier == "MAFilter(20, trend_confirm)"
+        assert "买入信号被拦截" in trace.reason
+
+    def test_backtest_result_blocked_signals_default_empty(self):
+        from domain.backtest.models import BacktestResult
+
+        result = BacktestResult(
+            strategy_name="DCA",
+            fund_code="000001",
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+            total_return=0.10,
+            annualized_return=0.10,
+            max_drawdown=0.05,
+            sharpe_ratio=1.5,
+            win_rate=0.6,
+            trade_count=5,
+        )
+
+        assert result.blocked_signals == []

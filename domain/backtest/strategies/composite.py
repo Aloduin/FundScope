@@ -1,7 +1,7 @@
 """Composite strategy that combines a primary strategy with a signal modifier."""
 import dataclasses
 
-from domain.backtest.models import Signal, SignalContext
+from domain.backtest.models import Signal, SignalContext, BlockedSignalTrace
 from domain.backtest.strategies.base import Strategy
 from domain.backtest.strategies.modifiers.base import SignalModifier
 from domain.backtest.strategies.modifiers.ma_filter import MAFilter
@@ -18,7 +18,7 @@ class CompositeStrategy(Strategy):
     ):
         self.primary_strategy = primary_strategy
         self.modifier = modifier
-        self._blocked_signals: list[dict] = []
+        self._blocked_signals: list[BlockedSignalTrace] = []
 
         if isinstance(modifier, RebalancePolicy):
             raise NotImplementedError(
@@ -31,7 +31,7 @@ class CompositeStrategy(Strategy):
             return self.primary_strategy.name()
         return f"{self.primary_strategy.name()}+{self.modifier.name()}"
 
-    def get_blocked_signals(self) -> list[dict]:
+    def get_blocked_signals(self) -> list[BlockedSignalTrace]:
         return self._blocked_signals.copy()
 
     def generate_signals(self, nav_history: list[dict]) -> list[Signal]:
@@ -50,11 +50,13 @@ class CompositeStrategy(Strategy):
             context = self._build_context(signal.date, nav_history)
             result = self.modifier.modify(signal, context)
             if result is None:
-                self._blocked_signals.append({
-                    "original": dataclasses.replace(signal),
-                    "modifier": self.modifier.name(),
-                    "reason": self.modifier.explain_block(signal, context)
-                })
+                self._blocked_signals.append(
+                BlockedSignalTrace(
+                    original=dataclasses.replace(signal),
+                    modifier=self.modifier.name(),
+                    reason=self.modifier.explain_block(signal, context),
+                )
+            )
             else:
                 final_signals.append(result)
 

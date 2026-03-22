@@ -1,7 +1,7 @@
 from datetime import date, timedelta
 import pytest
 
-from domain.backtest.models import Signal
+from domain.backtest.models import Signal, BlockedSignalTrace
 from domain.backtest.strategies.base import Strategy
 from domain.backtest.strategies.dca import DCAStrategy
 from domain.backtest.strategies.modifiers.ma_filter import MAFilter
@@ -93,8 +93,9 @@ class TestCompositeStrategy:
         assert signals == []
         blocked = composite.get_blocked_signals()
         assert len(blocked) == 1
-        assert blocked[0]["original"].action == "BUY"
-        assert "买入信号被拦截" in blocked[0]["reason"]
+        assert isinstance(blocked[0], BlockedSignalTrace)
+        assert blocked[0].original.action == "BUY"
+        assert "买入信号被拦截" in blocked[0].reason
 
     def test_blocked_signals_cleared_each_run(self):
         from domain.backtest.strategies.composite import CompositeStrategy

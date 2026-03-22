@@ -34,6 +34,9 @@ class MockStrategy:
     def generate_signals(self, nav_history):
         return self._signals
 
+    def get_blocked_signals(self):
+        return []
+
 
 class TestBacktestEngine:
     """Tests for BacktestEngine."""
@@ -110,3 +113,65 @@ class TestBacktestEngine:
         assert result.win_rate is not None
         assert result.start_date == start_date
         assert result.end_date == nav_history[-1]["date"]
+
+
+class TestBacktestEngineBlockedSignals:
+    """Tests for blocked signals in backtest results."""
+
+    def test_engine_with_composite_strategy_returns_blocked_signals(self):
+        """Engine collects blocked signals from composite strategy."""
+        from domain.backtest.strategies.composite import CompositeStrategy
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
+
+        engine = BacktestEngine(initial_cash=100000)
+
+        # Downward trend - should trigger blocks
+        nav_history = []
+        for i in range(60):
+            d = date(2023, 1, 1) + timedelta(days=i)
+            nav_history.append({"date": d, "nav": 1.0 - i * 0.01, "acc_nav": 1.0})
+
+        dca = DCAStrategy(invest_amount=1000, invest_interval_days=20)
+        ma_filter = MAFilter(window=20)
+        composite = CompositeStrategy(primary_strategy=dca, modifier=ma_filter)
+
+        result = engine.run(composite, fund_code="000001", nav_history=nav_history)
+
+        assert len(result.blocked_signals) > 0
+        assert result.blocked_signals[0].original.action == "BUY"
+
+    def test_engine_with_composite_strategy_no_blocks(self):
+        """Engine returns empty blocked_signals when no signals blocked."""
+        from domain.backtest.strategies.composite import CompositeStrategy
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
+
+        engine = BacktestEngine(initial_cash=100000)
+
+        # Upward trend - no blocks expected
+        nav_history = []
+        for i in range(60):
+            d = date(2023, 1, 1) + timedelta(days=i)
+            nav_history.append({"date": d, "nav": 1.0 + i * 0.01, "acc_nav": 1.0})
+
+        dca = DCAStrategy(invest_amount=1000, invest_interval_days=20)
+        ma_filter = MAFilter(window=20)
+        composite = CompositeStrategy(primary_strategy=dca, modifier=ma_filter)
+
+        result = engine.run(composite, fund_code="000001", nav_history=nav_history)
+
+        assert result.blocked_signals == []
+
+    def test_engine_with_normal_strategy_empty_blocked_signals(self):
+        """Engine returns empty blocked_signals for normal (non-composite) strategy."""
+
+        engine = BacktestEngine(initial_cash=100000)
+
+        nav_history = []
+        for i in range(60):
+            d = date(2023, 1, 1) + timedelta(days=i)
+            nav_history.append({"date": d, "nav": 1.0 + i * 0.001, "acc_nav": 1.0})
+
+        dca = DCAStrategy(invest_amount=1000, invest_interval_days=20)
+        result = engine.run(dca, fund_code="000001", nav_history=nav_history)
+
+        assert result.blocked_signals == []

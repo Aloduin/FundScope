@@ -20,6 +20,7 @@ class BacktestEngine:
             raise ValueError("NAV history cannot be empty")
 
         signals = strategy.generate_signals(nav_history)
+        blocked_signals = strategy.get_blocked_signals()
 
         for signal in signals:
             if signal.fund_code == "UNKNOWN":
@@ -134,5 +135,6 @@ class BacktestEngine:
             trade_count=len(executed_trades),
             signals=signals,
             equity_curve=equity_curve,
-            executed_trades=executed_trades
+            executed_trades=executed_trades,
+            blocked_signals=blocked_signals,
         )

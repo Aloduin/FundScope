@@ -204,7 +204,7 @@ with tab_backtest:
     with col1:
         backtest_fund_code = st.text_input("基金代码", placeholder="例如：000001", max_chars=6, key="bt_fund_code")
     with col2:
-        strategy_name = st.selectbox("策略选择", options=["DCA", "MA Timing"], key="bt_strategy")
+        strategy_name = st.selectbox("策略选择", options=["DCA", "MA Timing", "DCA + MA Filter"], key="bt_strategy")
 
     # Strategy parameters
     st.markdown("**策略参数**")
@@ -218,7 +218,7 @@ with tab_backtest:
             "invest_amount": dca_invest_amount,
             "interval_days": dca_interval
         }
-    else:  # MA Timing
+    elif strategy_name == "MA Timing":
         col1, col2 = st.columns(2)
         with col1:
             ma_short_window = st.number_input("短期均线 (天)", min_value=3, step=1, value=5, key="bt_ma_short")
@@ -227,6 +227,19 @@ with tab_backtest:
         strategy_params = {
             "short_window": ma_short_window,
             "long_window": ma_long_window
+        }
+    else:  # DCA + MA Filter
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            dca_invest_amount = st.number_input("每次投资金额 (元)", min_value=1000.0, step=1000.0, value=10000.0, key="bt_dca_amount")
+        with col2:
+            dca_interval = st.number_input("投资间隔 (天)", min_value=7, step=7, value=20, key="bt_dca_interval")
+        with col3:
+            ma_window = st.number_input("MA 窗口 (天)", min_value=5, step=1, value=20, key="bt_ma_window")
+        strategy_params = {
+            "invest_amount": dca_invest_amount,
+            "interval_days": dca_interval,
+            "ma_window": ma_window
         }
 
     # Date range
@@ -327,6 +340,33 @@ with tab_backtest:
                                 st.metric("卖出次数", len(sell_trades))
                         else:
                             st.info("回测期间无交易执行")
+
+                        # Explanation panel for composite strategy
+                        # IMPORTANT: Check result.strategy_name, NOT dropdown value
+                        is_composite_result = "MAFilter" in result.strategy_name
+
+                        if is_composite_result:
+                            st.divider()
+                            with st.expander("📋 信号解释", expanded=False):
+                                final_signal_count = len(result.signals)
+                                blocked_count = len(result.blocked_signals)
+
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.metric("最终信号", final_signal_count)
+                                with col2:
+                                    st.metric("被拦截信号", blocked_count)
+
+                                if blocked_count == 0:
+                                    st.success("本次组合策略运行中没有信号被拦截。")
+                                else:
+                                    st.markdown("**拦截详情：**")
+                                    for item in result.blocked_signals:
+                                        signal = item.original
+                                        st.write(
+                                            f"- {signal.date} **{signal.action}** "
+                                            f"({item.modifier}) → {item.reason}"
+                                        )
 
                     except Exception as e:
                         st.error(f"回测失败：{str(e)}")

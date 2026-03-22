@@ -1,12 +1,28 @@
-# Phase 3B: 策略解释面板 Implementation Plan
+# Phase 3B: 策略解释面板 Implementation Plan（最终可执行版）
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在回测结果中展示组合策略拦截的信号及原因，让用户理解过滤逻辑。
+**Goal:** 在回测结果中展示组合策略被拦截的信号及原因，让用户理解过滤逻辑，形成 “策略执行 → 结果展示 → 信号解释” 的完整闭环。
 
-**Architecture:** 新增 `BlockedSignalTrace` dataclass 携带拦截数据；Strategy 基类增加 `get_blocked_signals()` 默认方法；Engine 统一调用该接口；BacktestService 支持 "DCA + MA Filter" 组合策略；UI 增加解释面板。
+**Architecture:**
 
-**Tech Stack:** Python 3.13, dataclasses, pytest, Streamlit
+* 新增 `BlockedSignalTrace` dataclass 作为统一的拦截信号追踪模型
+* `Strategy` 基类增加 `get_blocked_signals()` 默认方法，保证 engine 可统一读取
+* `CompositeStrategy` 返回 `list[BlockedSignalTrace]`，替代原来的 `list[dict]`
+* `BacktestEngine` 不再判断具体策略类型，而是统一通过 `strategy.get_blocked_signals()` 获取解释数据
+* `BacktestService` 支持创建 `"DCA + MA Filter"` 组合策略
+* `ui/pages/3_strategy_lab.py` 增加组合策略选项、参数区和解释面板
+
+**Scope constraints:**
+
+* 本阶段仅消费 Phase 3A 已实现的过滤型组合策略能力
+* 不接入 RebalancePolicy 主流程
+* 不做通用多策略组合 UI
+* 不做完整信号修改历史，只展示“被拦截信号”
+
+**Phase 3A consistency:**
+本计划基于已确定的 Phase 3A 设计：`CompositeStrategy + SignalModifier + MAFilter` 为主流程，`RebalancePolicy` 仅保留接口、不接入主流程。
+另外，`ThresholdRebalancePolicy` 的阈值与归一化约束仍作为后续预留，不纳入 Phase 3B 实现范围。
 
 ---
 
@@ -14,7 +30,7 @@
 
 ```text
 domain/backtest/
-├── models.py                    # 新增 BlockedSignalTrace
+├── models.py                    # 新增 BlockedSignalTrace；扩展 BacktestResult
 └── strategies/
     ├── base.py                  # 新增 get_blocked_signals() 默认方法
     └── composite.py             # 修改返回类型为 list[BlockedSignalTrace]
@@ -27,8 +43,13 @@ ui/pages/
 
 tests/domain/backtest/
 ├── test_models.py               # 新增 BlockedSignalTrace 测试
+├── test_engine.py               # 新增 engine blocked_signals 测试
 └── strategies/
+    ├── test_base.py             # 新增 get_blocked_signals() 默认方法测试
     └── test_composite.py        # 修改测试适配新返回类型
+
+tests/service/
+└── test_backtest_service.py     # 新增组合策略创建与 blocked_signals 集成测试
 ```
 
 ---
@@ -36,19 +57,21 @@ tests/domain/backtest/
 ## Task 1: 新增 BlockedSignalTrace dataclass
 
 **Files:**
-- Modify: `domain/backtest/models.py`
-- Modify: `tests/domain/backtest/test_models.py`
 
-### - [ ] Step 1: Write failing tests for BlockedSignalTrace
+* Modify: `domain/backtest/models.py`
+* Modify: `tests/domain/backtest/test_models.py`
+
+### - [ ] Step 1: 为 BlockedSignalTrace 编写失败测试
+
+将下面测试追加到 `tests/domain/backtest/test_models.py`：
 
 ```python
-# tests/domain/backtest/test_models.py - add to existing file
+from datetime import date
 
 class TestBlockedSignalTrace:
     """Tests for BlockedSignalTrace dataclass."""
 
     def test_blocked_signal_trace_creation(self):
-        from datetime import date
         from domain.backtest.models import Signal, BlockedSignalTrace
 
         signal = Signal(
@@ -69,7 +92,6 @@ class TestBlockedSignalTrace:
         assert "买入信号被拦截" in trace.reason
 
     def test_backtest_result_blocked_signals_default_empty(self):
-        from datetime import date
         from domain.backtest.models import BacktestResult
 
         result = BacktestResult(
@@ -88,7 +110,7 @@ class TestBlockedSignalTrace:
         assert result.blocked_signals == []
 ```
 
-### - [ ] Step 2: Run test to verify it fails
+### - [ ] Step 2: 运行测试，确认失败
 
 ```bash
 uv run pytest tests/domain/backtest/test_models.py::TestBlockedSignalTrace -v
@@ -96,10 +118,13 @@ uv run pytest tests/domain/backtest/test_models.py::TestBlockedSignalTrace -v
 
 Expected: FAIL with `cannot import name 'BlockedSignalTrace'`
 
-### - [ ] Step 3: Implement BlockedSignalTrace
+### - [ ] Step 3: 实现 BlockedSignalTrace
+
+在 `domain/backtest/models.py` 中增加：
 
 ```python
-# domain/backtest/models.py - add after SignalContext dataclass
+from dataclasses import dataclass, field
+from datetime import date
 
 @dataclass
 class BlockedSignalTrace:
@@ -109,14 +134,13 @@ class BlockedSignalTrace:
     reason: str
 ```
 
-### - [ ] Step 4: Extend BacktestResult
+### - [ ] Step 4: 扩展 BacktestResult
+
+在 `domain/backtest/models.py` 中为 `BacktestResult` 增加字段：
 
 ```python
-# domain/backtest/models.py - add field to BacktestResult
-
 @dataclass
 class BacktestResult:
-    """Backtest result summary."""
     strategy_name: str
     fund_code: str
     start_date: date
@@ -130,10 +154,10 @@ class BacktestResult:
     signals: list[Signal] = field(default_factory=list)
     equity_curve: list[tuple[date, float]] = field(default_factory=list)
     executed_trades: list[ExecutedTrade] = field(default_factory=list)
-    blocked_signals: list[BlockedSignalTrace] = field(default_factory=list)  # 新增
+    blocked_signals: list[BlockedSignalTrace] = field(default_factory=list)
 ```
 
-### - [ ] Step 5: Run test to verify it passes
+### - [ ] Step 5: 运行测试，确认通过
 
 ```bash
 uv run pytest tests/domain/backtest/test_models.py::TestBlockedSignalTrace -v
@@ -145,7 +169,7 @@ Expected: PASS
 
 ```bash
 git add domain/backtest/models.py tests/domain/backtest/test_models.py
-git commit -m "feat(backtest): add BlockedSignalTrace dataclass and extend BacktestResult"
+git commit -m "feat(backtest): add BlockedSignalTrace and extend BacktestResult"
 ```
 
 ---
@@ -153,14 +177,15 @@ git commit -m "feat(backtest): add BlockedSignalTrace dataclass and extend Backt
 ## Task 2: Strategy 基类新增 get_blocked_signals() 默认方法
 
 **Files:**
-- Modify: `domain/backtest/strategies/base.py`
-- Modify: `tests/domain/backtest/strategies/test_base.py`
 
-### - [ ] Step 1: Write failing test for base class method
+* Modify: `domain/backtest/strategies/base.py`
+* Modify: `tests/domain/backtest/strategies/test_base.py`
+
+### - [ ] Step 1: 编写失败测试
+
+将下面测试追加到 `tests/domain/backtest/strategies/test_base.py` 的 `TestStrategyInterface` 中：
 
 ```python
-# tests/domain/backtest/strategies/test_base.py - add to TestStrategyInterface
-
 def test_strategy_default_get_blocked_signals_returns_empty_list(self):
     """Test that default get_blocked_signals returns empty list."""
     from domain.backtest.strategies.base import Strategy
@@ -176,44 +201,37 @@ def test_strategy_default_get_blocked_signals_returns_empty_list(self):
     assert strategy.get_blocked_signals() == []
 ```
 
-### - [ ] Step 2: Run test to verify it fails
+### - [ ] Step 2: 运行测试，确认失败
 
 ```bash
 uv run pytest tests/domain/backtest/strategies/test_base.py::TestStrategyInterface::test_strategy_default_get_blocked_signals_returns_empty_list -v
 ```
 
-Expected: FAIL with `'Strategy' object has no attribute 'get_blocked_signals'`
+Expected: FAIL with `'MinimalStrategy' object has no attribute 'get_blocked_signals'`
 
-### - [ ] Step 3: Implement default method in Strategy base class
+### - [ ] Step 3: 在 Strategy 基类中增加默认方法
+
+修改 `domain/backtest/strategies/base.py`：
 
 ```python
-# domain/backtest/strategies/base.py - add import at top
+from abc import ABC, abstractmethod
 from domain.backtest.models import Signal, BlockedSignalTrace
 
-# domain/backtest/strategies/base.py - add method to Strategy class
-
 class Strategy(ABC):
-    """Abstract base class for trading strategies."""
-
     @abstractmethod
     def name(self) -> str:
-        """Get strategy name."""
         raise NotImplementedError
 
     @abstractmethod
     def generate_signals(self, nav_history: list[dict]) -> list[Signal]:
-        """Generate trading signals from NAV history."""
         raise NotImplementedError
 
     def get_blocked_signals(self) -> list[BlockedSignalTrace]:
-        """Return blocked signal traces for explanation panel.
-
-        Default: no blocked signals. Override in CompositeStrategy.
-        """
+        """Default: no blocked signals."""
         return []
 ```
 
-### - [ ] Step 4: Run test to verify it passes
+### - [ ] Step 4: 运行测试，确认通过
 
 ```bash
 uv run pytest tests/domain/backtest/strategies/test_base.py::TestStrategyInterface::test_strategy_default_get_blocked_signals_returns_empty_list -v
@@ -225,65 +243,110 @@ Expected: PASS
 
 ```bash
 git add domain/backtest/strategies/base.py tests/domain/backtest/strategies/test_base.py
-git commit -m "feat(backtest): add get_blocked_signals() default method to Strategy base class"
+git commit -m "feat(backtest): add default get_blocked_signals() to Strategy"
 ```
 
 ---
 
-## Task 3: 修改 CompositeStrategy 返回 BlockedSignalTrace 列表
+## Task 3: CompositeStrategy 改为返回 BlockedSignalTrace 列表
 
 **Files:**
-- Modify: `domain/backtest/strategies/composite.py`
-- Modify: `tests/domain/backtest/strategies/test_composite.py`
 
-### - [ ] Step 1: Update tests to use attribute access (TDD: test change first)
+* Modify: `domain/backtest/strategies/composite.py`
+* Modify: `tests/domain/backtest/strategies/test_composite.py`
+
+### - [ ] Step 1: 先改测试，切换为属性访问
+
+在 `tests/domain/backtest/strategies/test_composite.py` 中，把原先基于 dict 的断言改为 dataclass 属性访问。
+
+例如：
 
 ```python
-# tests/domain/backtest/strategies/test_composite.py - update test_blocked_signals_recorded
-# Change from dict-style to attribute access:
-
-def test_blocked_signals_recorded(self):
-    # ... setup code unchanged ...
-    blocked = composite.get_blocked_signals()
-    assert len(blocked) == 1
-    assert blocked[0].original.action == "BUY"  # attribute access
-    assert "买入信号被拦截" in blocked[0].reason  # attribute access
+blocked = composite.get_blocked_signals()
+assert len(blocked) == 1
+assert blocked[0].original.action == "BUY"
+assert "买入信号被拦截" in blocked[0].reason
 ```
 
-### - [ ] Step 2: Run test to verify it fails (dict vs dataclass mismatch)
+同时把其他相关测试中的：
+
+```python
+record["original"]
+record["modifier"]
+record["reason"]
+```
+
+全部替换成：
+
+```python
+record.original
+record.modifier
+record.reason
+```
+
+### - [ ] Step 2: 运行测试，确认失败
 
 ```bash
-uv run pytest tests/domain/backtest/strategies/test_composite.py::TestCompositeStrategy::test_blocked_signals_recorded -v
+uv run pytest tests/domain/backtest/strategies/test_composite.py -v
 ```
 
 Expected: FAIL with `'dict' object has no attribute 'original'`
 
-### - [ ] Step 3: Update composite.py to use BlockedSignalTrace
+### - [ ] Step 3: 修改 CompositeStrategy
+
+更新 `domain/backtest/strategies/composite.py`：
 
 ```python
-# domain/backtest/strategies/composite.py - update imports
 import dataclasses
 from domain.backtest.models import Signal, SignalContext, BlockedSignalTrace
+from domain.backtest.strategies.base import Strategy
+from domain.backtest.strategies.modifiers.base import SignalModifier
 
-# domain/backtest/strategies/composite.py - update _blocked_signals type hint
-self._blocked_signals: list[BlockedSignalTrace] = []
+class CompositeStrategy(Strategy):
+    def __init__(self, primary_strategy: Strategy, modifier: SignalModifier | None = None):
+        self.primary_strategy = primary_strategy
+        self.modifier = modifier
+        self._blocked_signals: list[BlockedSignalTrace] = []
 
-# domain/backtest/strategies/composite.py - update generate_signals method
-# Replace the dict append with BlockedSignalTrace construction:
-self._blocked_signals.append(
-    BlockedSignalTrace(
-        original=dataclasses.replace(signal),
-        modifier=self.modifier.name(),
-        reason=self.modifier.explain_block(signal, context)
-    )
-)
+    def name(self) -> str:
+        if self.modifier is None:
+            return self.primary_strategy.name()
+        return f"{self.primary_strategy.name()}+{self.modifier.name()}"
 
-# domain/backtest/strategies/composite.py - update get_blocked_signals return type
-def get_blocked_signals(self) -> list[BlockedSignalTrace]:
-    return self._blocked_signals.copy()
+    def get_blocked_signals(self) -> list[BlockedSignalTrace]:
+        return self._blocked_signals.copy()
+
+    def generate_signals(self, nav_history: list[dict]) -> list[Signal]:
+        self._blocked_signals = []
+
+        if not nav_history:
+            return []
+
+        base_signals = self.primary_strategy.generate_signals(nav_history)
+
+        if self.modifier is None:
+            return base_signals
+
+        final_signals = []
+        for signal in base_signals:
+            context = self._build_context(signal, nav_history)
+            result = self.modifier.modify(signal, context)
+
+            if result is not None:
+                final_signals.append(result)
+            else:
+                self._blocked_signals.append(
+                    BlockedSignalTrace(
+                        original=dataclasses.replace(signal),
+                        modifier=self.modifier.name(),
+                        reason=self.modifier.explain_block(signal, context),
+                    )
+                )
+
+        return final_signals
 ```
 
-### - [ ] Step 4: Run all composite tests to verify they pass
+### - [ ] Step 4: 运行 CompositeStrategy 全量测试
 
 ```bash
 uv run pytest tests/domain/backtest/strategies/test_composite.py -v
@@ -300,30 +363,30 @@ git commit -m "refactor(backtest): CompositeStrategy returns BlockedSignalTrace 
 
 ---
 
-## Task 4: 修改 BacktestEngine 统一读取 blocked_signals
+## Task 4: BacktestEngine 统一读取 blocked_signals
 
 **Files:**
-- Modify: `domain/backtest/engine.py`
-- Modify: `tests/domain/backtest/test_engine.py`
 
-### - [ ] Step 1: Write tests for engine returning blocked_signals
+* Modify: `domain/backtest/engine.py`
+* Modify: `tests/domain/backtest/test_engine.py`
+
+### - [ ] Step 1: 编写 engine 侧失败测试
+
+在 `tests/domain/backtest/test_engine.py` 中新增：
 
 ```python
-# tests/domain/backtest/test_engine.py - add new test class
+from datetime import date, timedelta
 
 class TestBacktestEngineBlockedSignals:
     """Tests for blocked signals in backtest results."""
 
     def test_engine_with_composite_strategy_returns_blocked_signals(self):
-        """Test that engine returns blocked signals from composite strategy."""
         from domain.backtest.strategies.composite import CompositeStrategy
         from domain.backtest.strategies.dca import DCAStrategy
         from domain.backtest.strategies.modifiers.ma_filter import MAFilter
-        from datetime import date, timedelta
 
         engine = BacktestEngine(initial_cash=100000)
 
-        # Create downtrend NAV history (BUY signals will be blocked)
         nav_history = []
         for i in range(60):
             d = date(2023, 1, 1) + timedelta(days=i)
@@ -335,20 +398,16 @@ class TestBacktestEngineBlockedSignals:
 
         result = engine.run(composite, fund_code="000001", nav_history=nav_history)
 
-        # Should have blocked signals due to downtrend
         assert len(result.blocked_signals) > 0
         assert result.blocked_signals[0].original.action == "BUY"
 
     def test_engine_with_composite_strategy_no_blocks(self):
-        """Test that engine returns empty blocked_signals when none are blocked."""
         from domain.backtest.strategies.composite import CompositeStrategy
         from domain.backtest.strategies.dca import DCAStrategy
         from domain.backtest.strategies.modifiers.ma_filter import MAFilter
-        from datetime import date, timedelta
 
         engine = BacktestEngine(initial_cash=100000)
 
-        # Create uptrend NAV history (BUY signals will pass)
         nav_history = []
         for i in range(60):
             d = date(2023, 1, 1) + timedelta(days=i)
@@ -360,13 +419,10 @@ class TestBacktestEngineBlockedSignals:
 
         result = engine.run(composite, fund_code="000001", nav_history=nav_history)
 
-        # No blocked signals in uptrend
         assert result.blocked_signals == []
 
     def test_engine_with_normal_strategy_empty_blocked_signals(self):
-        """Test that normal strategies return empty blocked_signals."""
         from domain.backtest.strategies.dca import DCAStrategy
-        from datetime import date, timedelta
 
         engine = BacktestEngine(initial_cash=100000)
 
@@ -381,28 +437,26 @@ class TestBacktestEngineBlockedSignals:
         assert result.blocked_signals == []
 ```
 
-### - [ ] Step 2: Run tests to verify they fail
+### - [ ] Step 2: 运行测试，确认失败
 
 ```bash
 uv run pytest tests/domain/backtest/test_engine.py::TestBacktestEngineBlockedSignals -v
 ```
 
-Expected: FAIL (blocked_signals field missing or empty)
+Expected: FAIL because `blocked_signals` is missing or always empty
 
-### - [ ] Step 3: Modify engine to collect blocked_signals
+### - [ ] Step 3: 修改 engine 统一采集 blocked_signals
+
+修改 `domain/backtest/engine.py`，在 `run()` 中：
 
 ```python
-# domain/backtest/engine.py - add import at top
-from domain.backtest.models import ExecutedTrade, BacktestResult, BlockedSignalTrace
-
-# domain/backtest/engine.py - in run() method, add after line 22 (after generate_signals):
 signals = strategy.generate_signals(nav_history)
-blocked_signals = strategy.get_blocked_signals()  # Add this line
+blocked_signals = strategy.get_blocked_signals()
+```
 
-# domain/backtest/engine.py - update BacktestResult construction (line 124-138):
-# NOTE: Use the existing executed_trades variable maintained by the engine.
-# If the engine internally uses a different variable name (e.g., 'trades'),
-# ensure it is renamed to executed_trades before this change, or use the correct name here.
+并在构造 `BacktestResult` 时写入：
+
+```python
 return BacktestResult(
     strategy_name=strategy.name(),
     fund_code=fund_code,
@@ -417,11 +471,13 @@ return BacktestResult(
     signals=signals,
     equity_curve=equity_curve,
     executed_trades=executed_trades,
-    blocked_signals=blocked_signals,  # Add this line
+    blocked_signals=blocked_signals,
 )
 ```
 
-### - [ ] Step 4: Run tests to verify they pass
+> 注意：如果当前 engine 内部变量名仍是 `trades`，应先统一为 `executed_trades`，再做本改动。
+
+### - [ ] Step 4: 运行测试，确认通过
 
 ```bash
 uv run pytest tests/domain/backtest/test_engine.py::TestBacktestEngineBlockedSignals -v
@@ -429,7 +485,7 @@ uv run pytest tests/domain/backtest/test_engine.py::TestBacktestEngineBlockedSig
 
 Expected: PASS
 
-### - [ ] Step 5: Run all backtest tests
+### - [ ] Step 5: 跑完整 backtest 测试
 
 ```bash
 uv run pytest tests/domain/backtest/ -v
@@ -446,16 +502,20 @@ git commit -m "feat(backtest): engine collects blocked_signals via Strategy inte
 
 ---
 
-## Task 5: BacktestService 支持 "DCA + MA Filter" 组合策略
+## Task 5: BacktestService 支持 `"DCA + MA Filter"` 组合策略
 
 **Files:**
-- Modify: `service/backtest_service.py`
-- Modify: `tests/service/test_backtest_service.py`
 
-### - [ ] Step 1: Write tests for composite strategy creation and end-to-end
+* Modify: `service/backtest_service.py`
+* Modify: `tests/service/test_backtest_service.py`
+
+### - [ ] Step 1: 编写失败测试
+
+在 `tests/service/test_backtest_service.py` 中新增：
 
 ```python
-# tests/service/test_backtest_service.py - add to existing test class
+from datetime import date, timedelta
+from unittest.mock import patch
 
 def test_service_creates_composite_strategy(self):
     """Test that service creates DCA + MA Filter composite strategy."""
@@ -471,18 +531,14 @@ def test_service_creates_composite_strategy(self):
 
 def test_run_backtest_returns_blocked_signals_in_result(self):
     """Test that run_backtest returns blocked_signals in result."""
-    from unittest.mock import patch
-    from datetime import date, timedelta
-
     service = BacktestService()
 
-    # Create mock NAV history (downtrend)
     nav_history = []
     for i in range(60):
         d = date(2023, 1, 1) + timedelta(days=i)
         nav_history.append({"date": d, "nav": 1.0 - i * 0.01, "acc_nav": 1.0})
 
-    with patch.object(service.datasource, 'get_fund_nav_history', return_value=nav_history):
+    with patch.object(service.datasource, "get_fund_nav_history", return_value=nav_history):
         result = service.run_backtest(
             fund_code="000001",
             strategy_name="DCA + MA Filter",
@@ -496,12 +552,11 @@ def test_run_backtest_returns_blocked_signals_in_result(self):
             initial_cash=100000
         )
 
-    # Should have blocked signals due to downtrend
     assert len(result.blocked_signals) > 0
     assert result.blocked_signals[0].original.action == "BUY"
 ```
 
-### - [ ] Step 2: Run tests to verify they fail
+### - [ ] Step 2: 运行测试，确认失败
 
 ```bash
 uv run pytest tests/service/test_backtest_service.py::TestBacktestService::test_service_creates_composite_strategy tests/service/test_backtest_service.py::TestBacktestService::test_run_backtest_returns_blocked_signals_in_result -v
@@ -509,14 +564,18 @@ uv run pytest tests/service/test_backtest_service.py::TestBacktestService::test_
 
 Expected: FAIL with `Unknown strategy: DCA + MA Filter`
 
-### - [ ] Step 3: Implement composite strategy creation
+### - [ ] Step 3: 实现组合策略创建
+
+修改 `service/backtest_service.py`：
 
 ```python
-# service/backtest_service.py - add imports at top
 from domain.backtest.strategies.composite import CompositeStrategy
 from domain.backtest.strategies.modifiers.ma_filter import MAFilter
+```
 
-# service/backtest_service.py - add to _create_strategy method
+并更新 `_create_strategy()`：
+
+```python
 def _create_strategy(self, strategy_name: str, params: dict) -> Strategy:
     if strategy_name == "DCA":
         return DCAStrategy(
@@ -544,7 +603,7 @@ def _create_strategy(self, strategy_name: str, params: dict) -> Strategy:
         raise ValueError(f"Unknown strategy: {strategy_name}")
 ```
 
-### - [ ] Step 4: Run tests to verify they pass
+### - [ ] Step 4: 运行测试，确认通过
 
 ```bash
 uv run pytest tests/service/test_backtest_service.py::TestBacktestService::test_service_creates_composite_strategy tests/service/test_backtest_service.py::TestBacktestService::test_run_backtest_returns_blocked_signals_in_result -v
@@ -561,53 +620,101 @@ git commit -m "feat(service): add DCA + MA Filter composite strategy support"
 
 ---
 
-## Task 6: UI 增加组合策略选项和解释面板
+## Task 6: UI 增加组合策略选项与解释面板
 
 **Files:**
-- Modify: `ui/pages/3_strategy_lab.py`
 
-### - [ ] Step 1: Update strategy selectbox options
+* Modify: `ui/pages/3_strategy_lab.py`
+
+### - [ ] Step 1: 扩展策略下拉框
 
 ```python
-# ui/pages/3_strategy_lab.py - update strategy_name selectbox (around line 207)
-strategy_name = st.selectbox("策略选择", options=["DCA", "MA Timing", "DCA + MA Filter"], key="bt_strategy")
+strategy_name = st.selectbox(
+    "策略选择",
+    options=["DCA", "MA Timing", "DCA + MA Filter"],
+    key="bt_strategy"
+)
 ```
 
-### - [ ] Step 2: Add MA window parameter for composite strategy
+### - [ ] Step 2: 增加 `"DCA + MA Filter"` 参数区
+
+替换原有策略参数逻辑为：
 
 ```python
-# ui/pages/3_strategy_lab.py - update strategy parameters section (after line 230)
-# Replace the existing strategy params block with:
-
 st.markdown("**策略参数**")
+
 if strategy_name == "DCA":
     col1, col2 = st.columns(2)
     with col1:
-        dca_invest_amount = st.number_input("每次投资金额 (元)", min_value=1000.0, step=1000.0, value=10000.0, key="bt_dca_amount")
+        dca_invest_amount = st.number_input(
+            "每次投资金额 (元)",
+            min_value=1000.0,
+            step=1000.0,
+            value=10000.0,
+            key="bt_dca_amount"
+        )
     with col2:
-        dca_interval = st.number_input("投资间隔 (天)", min_value=7, step=7, value=20, key="bt_dca_interval")
+        dca_interval = st.number_input(
+            "投资间隔 (天)",
+            min_value=7,
+            step=7,
+            value=20,
+            key="bt_dca_interval"
+        )
     strategy_params = {
         "invest_amount": dca_invest_amount,
-        "interval_days": dca_interval
+        "interval_days": dca_interval,
     }
+
 elif strategy_name == "MA Timing":
     col1, col2 = st.columns(2)
     with col1:
-        ma_short_window = st.number_input("短期均线 (天)", min_value=3, step=1, value=5, key="bt_ma_short")
+        ma_short_window = st.number_input(
+            "短期均线 (天)",
+            min_value=3,
+            step=1,
+            value=5,
+            key="bt_ma_short"
+        )
     with col2:
-        ma_long_window = st.number_input("长期均线 (天)", min_value=10, step=5, value=20, key="bt_ma_long")
+        ma_long_window = st.number_input(
+            "长期均线 (天)",
+            min_value=10,
+            step=5,
+            value=20,
+            key="bt_ma_long"
+        )
     strategy_params = {
         "short_window": ma_short_window,
-        "long_window": ma_long_window
+        "long_window": ma_long_window,
     }
+
 elif strategy_name == "DCA + MA Filter":
     col1, col2, col3 = st.columns(3)
     with col1:
-        dca_invest_amount = st.number_input("每次投资金额 (元)", min_value=1000.0, step=1000.0, value=10000.0, key="bt_dca_amount")
+        dca_invest_amount = st.number_input(
+            "每次投资金额 (元)",
+            min_value=1000.0,
+            step=1000.0,
+            value=10000.0,
+            key="bt_dca_amount"
+        )
     with col2:
-        dca_interval = st.number_input("投资间隔 (天)", min_value=7, step=7, value=20, key="bt_dca_interval")
+        dca_interval = st.number_input(
+            "投资间隔 (天)",
+            min_value=7,
+            step=7,
+            value=20,
+            key="bt_dca_interval"
+        )
     with col3:
-        ma_window = st.number_input("MA 窗口 (天)", min_value=5, step=1, value=20, key="bt_ma_window")
+        ma_window = st.number_input(
+            "MA 窗口 (天)",
+            min_value=5,
+            step=1,
+            value=20,
+            key="bt_ma_window"
+        )
     strategy_params = {
         "invest_amount": dca_invest_amount,
         "interval_days": dca_interval,
@@ -615,12 +722,11 @@ elif strategy_name == "DCA + MA Filter":
     }
 ```
 
-### - [ ] Step 3: Add explanation panel after backtest results
+### - [ ] Step 3: 在结果区域增加解释面板
+
+在回测结果展示区、交易记录区之后增加：
 
 ```python
-# ui/pages/3_strategy_lab.py - add after trade statistics section (after line 327)
-# IMPORTANT: Check result.strategy_name instead of dropdown value to avoid UI state issues
-# when user changes dropdown after running backtest
 is_composite_result = "MAFilter" in result.strategy_name
 
 if is_composite_result:
@@ -647,7 +753,24 @@ if is_composite_result:
                 )
 ```
 
-### - [ ] Step 4: Commit
+> 注意：解释面板显示条件要基于 **`result.strategy_name`**，不要仅依赖当前下拉框值，避免用户改动 UI 选择后影响已展示结果。
+
+### - [ ] Step 4: 手工验证 UI
+
+运行：
+
+```bash
+uv run streamlit run ui/app.py
+```
+
+手工检查：
+
+1. 下拉框出现 `"DCA + MA Filter"`
+2. 参数区出现 3 个输入项
+3. 运行下跌趋势回测时，解释面板能显示被拦截信号
+4. 切换下拉框但不重新运行时，已展示结果仍保持正确解释面板状态
+
+### - [ ] Step 5: Commit
 
 ```bash
 git add ui/pages/3_strategy_lab.py
@@ -656,21 +779,32 @@ git commit -m "feat(ui): add DCA + MA Filter option and explanation panel"
 
 ---
 
-## Task 7: 运行全量测试
+## Task 7: 全量测试与收尾
 
-### - [ ] Step 1: Run all tests
+### - [ ] Step 1: 跑 backtest 相关测试
+
+```bash
+uv run pytest tests/domain/backtest/ tests/service/test_backtest_service.py -v
+```
+
+Expected: PASS
+
+### - [ ] Step 2: 跑完整测试套件
 
 ```bash
 uv run pytest -v
 ```
 
-Expected: All tests pass
+Expected: All pass
 
-### - [ ] Step 2: Fix any failures if needed
+### - [ ] Step 3: 如有失败，修复并提交
 
-If tests fail, fix them and commit.
+```bash
+git add -A
+git commit -m "fix: address Phase 3B test failures"
+```
 
-### - [ ] Step 3: Final commit and push
+### - [ ] Step 4: Push
 
 ```bash
 git push
@@ -678,22 +812,36 @@ git push
 
 ---
 
+## 验收标准
+
+* [ ] `BlockedSignalTrace` 已落地，`BacktestResult.blocked_signals` 默认空列表
+* [ ] `Strategy` 基类默认实现 `get_blocked_signals()`
+* [ ] `CompositeStrategy.get_blocked_signals()` 返回 `list[BlockedSignalTrace]`
+* [ ] `BacktestEngine` 统一通过 `strategy.get_blocked_signals()` 取解释数据
+* [ ] `BacktestService` 支持 `"DCA + MA Filter"`
+* [ ] `3_strategy_lab.py` 出现组合策略选项和解释面板
+* [ ] 下跌趋势下，`DCA + MA Filter` 能展示被拦截 BUY 信号
+* [ ] 普通单策略结果 `blocked_signals == []`
+* [ ] 全量测试通过
+
+---
+
 ## Summary
 
-| Task | Files Modified | Tests Added |
-|------|----------------|-------------|
-| 1. BlockedSignalTrace | models.py, test_models.py | 2 |
-| 2. Strategy base method | base.py, test_base.py | 1 |
-| 3. CompositeStrategy refactor | composite.py, test_composite.py | 0 (updated) |
-| 4. Engine blocked_signals | engine.py, test_engine.py | 3 |
-| 5. Service composite strategy | backtest_service.py, test_backtest_service.py | 2 |
-| 6. UI explanation panel | 3_strategy_lab.py | 0 |
-| 7. Full test suite | - | - |
+| Task                                  | Files Modified                                    | Tests Added/Updated |
+| ------------------------------------- | ------------------------------------------------- | ------------------- |
+| 1. BlockedSignalTrace                 | `models.py`, `test_models.py`                     | 2                   |
+| 2. Strategy base default method       | `base.py`, `test_base.py`                         | 1                   |
+| 3. CompositeStrategy typed traces     | `composite.py`, `test_composite.py`               | updated             |
+| 4. Engine blocked_signals integration | `engine.py`, `test_engine.py`                     | 3                   |
+| 5. Service composite strategy         | `backtest_service.py`, `test_backtest_service.py` | 2                   |
+| 6. UI explanation panel               | `3_strategy_lab.py`                               | manual verification |
+| 7. Full validation                    | -                                                 | all                 |
 
-**Total new tests:** 8
 **Phase 3B deliverable:**
-- `BlockedSignalTrace` dataclass
-- Strategy 基类 `get_blocked_signals()` 方法
-- Engine 统一收集 blocked_signals
-- "DCA + MA Filter" 组合策略入口
-- UI 解释面板
+
+* `BlockedSignalTrace` dataclass
+* Strategy 基类 `get_blocked_signals()` 默认方法
+* Engine 统一收集 blocked_signals
+* `"DCA + MA Filter"` 组合策略入口
+* UI 解释面板

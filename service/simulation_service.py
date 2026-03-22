@@ -222,13 +222,71 @@ class SimulationService:
         account = self.get_account(account_id)
         created_new_account = account is None
 
-        # Placeholder - will implement logic in subsequent tasks
+        if mode == "append":
+            return self._import_append(account_id, holdings, nav, total_amount)
+        else:
+            # replace mode - will implement in next task
+            return self._import_replace(account_id, holdings, nav, total_amount, initial_cash, created_new_account)
+
+    def _import_append(
+        self,
+        account_id: str,
+        holdings: list[dict],
+        nav: float,
+        total_amount: float,
+    ) -> dict:
+        """Append holdings to existing account."""
+        account = self.get_account(account_id)
+        if account is None:
+            raise ValueError(f"Account not found: {account_id}")
+
+        if account.cash < total_amount:
+            raise ValueError(
+                f"Insufficient cash: {account.cash:.2f} < {total_amount:.2f}"
+            )
+
+        reason = "从持仓诊断页导入，按 NAV=1.0 初始化模拟持仓"
+        imported_count = 0
+
+        for h in holdings:
+            self.execute_buy(
+                account_id=account_id,
+                fund_code=h["fund_code"],
+                fund_name=h["fund_name"],
+                amount=h["amount"],
+                nav=nav,
+                reason=reason,
+            )
+            imported_count += 1
+
+        account = self.get_account(account_id)
         return {
             "account": account,
+            "created_new_account": False,
+            "imported_count": imported_count,
+            "skipped_count": 0,
+            "mode": "append",
+            "nav_used": nav,
+            "message": f"已将 {imported_count} 条持仓追加到账户 {account_id}",
+        }
+
+    def _import_replace(
+        self,
+        account_id: str,
+        holdings: list[dict],
+        nav: float,
+        total_amount: float,
+        initial_cash: float,
+        created_new_account: bool,
+    ) -> dict:
+        """Replace account holdings with imported holdings."""
+        # Placeholder - will implement in next task
+        return {
+            "account": None,
             "created_new_account": created_new_account,
             "imported_count": 0,
             "skipped_count": 0,
-            "mode": mode,
+            "mode": "replace",
             "nav_used": nav,
             "message": "Not implemented",
         }

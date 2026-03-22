@@ -179,3 +179,52 @@ class TestImportHoldings:
                 account_id=account_id,
                 mode="invalid",
             )
+
+    def test_append_to_existing_account(self):
+        """Test append mode adds to existing positions."""
+        account_id = self._get_unique_id("002")
+        self.service.create_account(account_id, 100000.0)
+
+        holdings = [
+            {"fund_code": "000001", "fund_name": "基金A", "amount": 10000.0},
+            {"fund_code": "000002", "fund_name": "基金B", "amount": 5000.0},
+        ]
+
+        result = self.service.import_holdings(
+            holdings=holdings,
+            account_id=account_id,
+            mode="append",
+        )
+
+        assert result["imported_count"] == 2
+        assert result["created_new_account"] is False
+        assert result["mode"] == "append"
+
+        account = self.service.get_account(account_id)
+        assert abs(account.cash - 85000.0) < 0.01  # 100000 - 10000 - 5000
+        assert len(account.positions) == 2
+
+    def test_append_insufficient_cash_raises(self):
+        """Test append mode raises when insufficient cash."""
+        account_id = self._get_unique_id("003")
+        self.service.create_account(account_id, 5000.0)
+
+        holdings = [{"fund_code": "000001", "fund_name": "基金A", "amount": 10000.0}]
+
+        with pytest.raises(ValueError, match="Insufficient cash"):
+            self.service.import_holdings(
+                holdings=holdings,
+                account_id=account_id,
+                mode="append",
+            )
+
+    def test_append_nonexistent_account_raises(self):
+        """Test append mode raises when account not found."""
+        holdings = [{"fund_code": "000001", "fund_name": "基金A", "amount": 10000.0}]
+
+        with pytest.raises(ValueError, match="Account not found"):
+            self.service.import_holdings(
+                holdings=holdings,
+                account_id=self._get_unique_id("nonexistent"),
+                mode="append",
+            )

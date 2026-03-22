@@ -59,6 +59,7 @@
 
 - 策略一次性生成整段回测期间的所有组合信号
 - Engine 不循环调用策略，只调用一次
+- **每个交易日最多一条 `PortfolioSignal`**，若策略输出同日多条信号，直接报错
 
 ### 2.2 权重归一化约束
 
@@ -68,6 +69,7 @@
 - 所有权重满足 `0 <= w <= 1`
 - 总和满足 `abs(sum(weights.values()) - 1.0) < 1e-6`
 - 若策略输出不满足约束，视为无效信号并报错
+- **必须在模型层 `__post_init__` 中校验**，而非仅在文档约束
 
 ### 2.3 Momentum 默认配仓规则
 
@@ -94,8 +96,15 @@
 3. `T+1` 当日**先卖出，再买入**
 4. 卖出和买入都按 `T+1` 同一日 NAV 成交
 5. 最后一个交易日产生的信号，如无 `T+1` 数据，则丢弃不执行
+6. **执行后不强制重置 cash，只基于真实交易结果保留剩余现金**
 
-### 2.5 策略隔离原则
+### 2.5 时间轴职责划分
+
+- **Engine 负责**：时间轴对齐（取交集）、lookback 可用性裁剪
+- **Strategy 负责**：在已对齐的有效时间轴上生成信号
+- Strategy 接收的 `nav_histories` 已由 Engine 完成裁剪，无需再做对齐
+
+### 2.6 策略隔离原则
 
 - 新建 `PortfolioMomentumStrategy`，实现 `PortfolioStrategy`
 - 不修改现有单基金 `MomentumStrategy`
@@ -122,12 +131,26 @@ class PortfolioSignal:
     target_weights: dict[str, float]  # fund_code -> weight, includes "CASH"
     confidence: float
     reason: str
+
+    def __post_init__(self) -> None:
+        """校验信号有效性。"""
+        if self.action != "REBALANCE":
+            raise ValueError(f"PortfolioSignal.action must be 'REBALANCE', got {self.action}")
+
+        if "CASH" not in self.target_weights:
+            raise ValueError("target_weights must include 'CASH'")
+
+        total = sum(self.target_weights.values())
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"target_weights must sum to 1.0, got {total:.6f}")
+
+        for fund_code, weight in self.target_weights.items():
+            if not 0.0 <= weight <= 1.0:
+                raise ValueError(f"invalid weight for {fund_code}: {weight}")
+
+        if not self.reason:
+            raise ValueError("reason cannot be empty")
 ```
-
-**约束：**
-
-- `target_weights` 必须包含 `"CASH"` 键
-- 所有权重总和必须等于 1.0
 
 ---
 
@@ -192,6 +215,7 @@ class ExecutedTrade:
 
 ```python
 from abc import ABC, abstractmethod
+from datetime import date
 from domain.backtest.models import PortfolioSignal
 
 class PortfolioStrategy(ABC):
@@ -205,15 +229,22 @@ class PortfolioStrategy(ABC):
     @abstractmethod
     def generate_portfolio_signals(
         self,
-        nav_histories: dict[str, list[dict]]
+        nav_histories: dict[str, list[dict]],
+        aligned_dates: list[date]
     ) -> list[PortfolioSignal]:
         """一次性生成整段期间的所有组合信号。
 
         Args:
             nav_histories: fund_code -> [{"date": date, "nav": float, ...}, ...]
+                           已由 Engine 完成时间轴对齐和 lookback 裁剪
+            aligned_dates: 已对齐的有效交易日列表
 
         Returns:
             按时间排序的 PortfolioSignal 列表
+
+        约束:
+            - 每个交易日最多返回一条信号
+            - 若同日返回多条信号，将触发运行时错误
         """
         raise NotImplementedError
 ```
@@ -239,7 +270,11 @@ class MomentumConfig:
 
 
 class PortfolioMomentumStrategy(PortfolioStrategy):
-    """多基金动量轮动策略。"""
+    """多基金动量轮动策略。
+
+    假设输入的 nav_histories 已由 Engine 完成时间轴对齐和 lookback 可用性裁剪，
+    仅负责在给定有效时间轴上生成组合信号。
+    """
 
     def __init__(self, config: MomentumConfig | None = None):
         self.config = config or MomentumConfig()
@@ -249,32 +284,47 @@ class PortfolioMomentumStrategy(PortfolioStrategy):
 
     def generate_portfolio_signals(
         self,
-        nav_histories: dict[str, list[dict]]
+        nav_histories: dict[str, list[dict]],
+        aligned_dates: list[date]
     ) -> list[PortfolioSignal]:
+        """生成组合信号。
+
+        Args:
+            nav_histories: 已对齐的净值历史
+            aligned_dates: 有效交易日列表（已保证每个日期有足够 lookback 数据）
+
+        Returns:
+            组合信号列表
+        """
         signals = []
+        signal_dates = set()  # 用于检测同日多信号
 
-        # 1. 对齐时间轴
-        aligned_dates = self._align_dates(nav_histories)
+        # 构建日期 -> NAV 索引
+        nav_by_date = self._index_nav_by_date(nav_histories)
 
-        # 2. 按间隔生成信号
+        # 按间隔生成信号
         last_signal_date = None
         for current_date in aligned_dates:
             if last_signal_date is None or \
                (current_date - last_signal_date).days >= self.config.signal_interval_days:
 
-                # 3. 计算各基金收益率
-                returns = self._calculate_returns(
-                    nav_histories, current_date, self.config.lookback_days
+                # 计算各基金收益率（基于精确的 lookback 日期）
+                returns = self._calculate_returns_exact(
+                    nav_by_date, current_date, self.config.lookback_days
                 )
 
-                # 4. 选前 top_n
+                if not returns:
+                    # 所有基金数据不足，跳过该日
+                    continue
+
+                # 选前 top_n
                 sorted_funds = sorted(returns.items(), key=lambda x: x[1], reverse=True)
                 top_funds = [f[0] for f in sorted_funds[:self.config.top_n]]
 
-                # 5. 构造目标权重（等权 + CASH）
+                # 构造目标权重（等权 + CASH）
                 target_weights = self._build_target_weights(top_funds)
 
-                # 6. 生成信号
+                # 生成信号
                 signal = PortfolioSignal(
                     date=current_date,
                     action="REBALANCE",
@@ -282,38 +332,55 @@ class PortfolioMomentumStrategy(PortfolioStrategy):
                     confidence=1.0,
                     reason=f"动量轮动：{', '.join(top_funds)}"
                 )
+
+                # 检测同日多信号
+                if current_date in signal_dates:
+                    raise ValueError(f"Multiple signals on {current_date}")
+                signal_dates.add(current_date)
+
                 signals.append(signal)
                 last_signal_date = current_date
 
         return signals
 
-    def _align_dates(self, nav_histories: dict[str, list[dict]]) -> list[date]:
-        """取所有基金净值日期的交集。"""
-        date_sets = []
-        for nav_list in nav_histories.values():
-            dates = {d["date"] for d in nav_list}
-            date_sets.append(dates)
-        common_dates = sorted(set.intersection(*date_sets))
-        return common_dates
+    def _index_nav_by_date(self, nav_histories: dict[str, list[dict]]) -> dict[date, dict[str, float]]:
+        """构造日期 -> {fund_code: nav} 索引。"""
+        index = {}
+        for fund_code, nav_list in nav_histories.items():
+            for item in nav_list:
+                d = item["date"]
+                if d not in index:
+                    index[d] = {}
+                index[d][fund_code] = item["nav"]
+        return index
 
-    def _calculate_returns(
+    def _calculate_returns_exact(
         self,
-        nav_histories: dict[str, list[dict]],
+        nav_by_date: dict[date, dict[str, float]],
         as_of_date: date,
         lookback_days: int
     ) -> dict[str, float]:
-        """计算各基金在 lookback 窗口内的收益率。"""
+        """计算各基金在精确 lookback 窗口内的收益率。
+
+        使用 as_of_date 和 as_of_date - lookback_days 两个精确日期的 NAV 计算，
+        而非自然日窗口。这要求 Engine 已确保所有基金在这两个日期都有数据。
+        """
         returns = {}
         cutoff = as_of_date - timedelta(days=lookback_days)
 
-        for fund_code, nav_list in nav_histories.items():
-            # 筛选窗口内数据
-            window = [d for d in nav_list if cutoff <= d["date"] <= as_of_date]
-            if len(window) < 2:
-                continue  # 数据不足，跳过
+        end_navs = nav_by_date.get(as_of_date, {})
+        start_navs = nav_by_date.get(cutoff, {})
 
-            start_nav = window[0]["nav"]
-            end_nav = window[-1]["nav"]
+        for fund_code in end_navs:
+            if fund_code not in start_navs:
+                continue  # 起始日无数据
+
+            start_nav = start_navs[fund_code]
+            end_nav = end_navs[fund_code]
+
+            if start_nav <= 0:
+                continue  # 无效净值
+
             returns[fund_code] = (end_nav - start_nav) / start_nav
 
         return returns
@@ -465,7 +532,14 @@ class PortfolioState:
 
 
 class PortfolioBacktestEngine:
-    """组合回测引擎。"""
+    """组合回测引擎。
+
+    职责：
+    - 时间轴对齐（取所有基金净值日期交集）
+    - Lookback 可用性裁剪（确保每个日期都有足够历史数据）
+    - 信号执行（T+1 规则）
+    - 组合状态管理
+    """
 
     def __init__(self, initial_cash: float = 100000):
         self.initial_cash = initial_cash
@@ -476,6 +550,7 @@ class PortfolioBacktestEngine:
         fund_codes: list[str],
         nav_histories: dict[str, list[dict]],
         rebalance_policy: RebalancePolicy | None = None,
+        lookback_days: int = 60,
     ) -> PortfolioBacktestResult:
         """运行组合回测。
 
@@ -484,12 +559,16 @@ class PortfolioBacktestEngine:
             fund_codes: 基金池
             nav_histories: fund_code -> nav history
             rebalance_policy: 再平衡策略（可选）
+            lookback_days: 策略所需的最小历史数据天数（用于裁剪时间轴）
 
         Returns:
             组合回测结果
         """
-        # 1. 对齐时间轴
-        aligned_dates = self._align_dates(nav_histories)
+        # 1. 对齐时间轴并裁剪 lookback 不足的日期
+        aligned_dates = self._prepare_aligned_dates(nav_histories, lookback_days)
+        if not aligned_dates:
+            raise ValueError("No valid trading dates after alignment and lookback filtering")
+
         start_date = aligned_dates[0]
         end_date = aligned_dates[-1]
 
@@ -501,7 +580,14 @@ class PortfolioBacktestEngine:
         )
 
         # 3. 生成所有信号（一次性）
-        signals = strategy.generate_portfolio_signals(nav_histories)
+        signals = strategy.generate_portfolio_signals(nav_histories, aligned_dates)
+
+        # 3.1 校验：每个交易日最多一条信号
+        signal_dates = [s.date for s in signals]
+        if len(signal_dates) != len(set(signal_dates)):
+            duplicate_dates = [d for d in signal_dates if signal_dates.count(d) > 1]
+            raise ValueError(f"Multiple signals on same date: {set(duplicate_dates)}")
+
         signal_index = 0
 
         # 4. 按时间轴遍历执行
@@ -589,8 +675,76 @@ class PortfolioBacktestEngine:
             portfolio_weights_history=weights_history,
         )
 
+    def _prepare_aligned_dates(
+        self,
+        nav_histories: dict[str, list[dict]],
+        lookback_days: int
+    ) -> list[date]:
+        """准备对齐的时间轴，并裁剪 lookback 不足的日期。
+
+        规则：
+        1. 取所有基金净值日期的交集
+        2. 过滤掉所有不足 lookback_days 的日期
+        3. 确保每个有效日期都有对应的历史数据
+
+        Args:
+            nav_histories: 各基金的净值历史
+            lookback_days: 策略所需的最小历史天数
+
+        Returns:
+            有效交易日列表
+        """
+        # 1. 取日期交集
+        date_sets = []
+        for nav_list in nav_histories.values():
+            dates = {d["date"] for d in nav_list}
+            date_sets.append(dates)
+
+        if not date_sets:
+            return []
+
+        common_dates = sorted(set.intersection(*date_sets))
+
+        if not common_dates:
+            return []
+
+        # 2. 找到所有基金都有足够 lookback 数据的最早日期
+        # 对于每个候选日期，检查 lookback 天前是否有数据
+        min_start_date = None
+
+        # 获取所有日期集合（用于快速查找）
+        all_dates = set(common_dates)
+        sorted_all_dates = sorted(all_dates)
+
+        for candidate_date in common_dates:
+            cutoff = candidate_date - timedelta(days=lookback_days)
+
+            # 检查 cutoff 是否在数据范围内
+            # 由于交易日可能不连续，我们需要找到 >= cutoff 的最早日期
+            # 并确保这个日期与 candidate_date 之间有足够的数据点
+
+            # 简化处理：直接检查 cutoff 是否在数据中
+            # 如果不在，找到第一个 >= cutoff 的日期
+            dates_before = [d for d in sorted_all_dates if d <= candidate_date]
+
+            # 需要至少 lookback_days 个交易日
+            # 这里简化为：找到第一个有足够历史数据的日期
+            if len(dates_before) >= lookback_days:
+                min_start_date = candidate_date
+                break
+
+        if min_start_date is None:
+            return []
+
+        # 3. 返回从 min_start_date 开始的所有日期
+        valid_dates = [d for d in common_dates if d >= min_start_date]
+        return valid_dates
+
     def _align_dates(self, nav_histories: dict[str, list[dict]]) -> list[date]:
-        """取所有基金净值日期的交集。"""
+        """取所有基金净值日期的交集（不含 lookback 裁剪）。
+
+        此方法保留供内部使用，但主要入口是 _prepare_aligned_dates。
+        """
         date_sets = []
         for nav_list in nav_histories.values():
             dates = {d["date"] for d in nav_list}
@@ -754,11 +908,14 @@ class PortfolioBacktestEngine:
                     rebalance_id=rebalance_id,
                 ))
 
-        # 4. 更新现金
-        state.cash = target_amounts.get("CASH", state.cash)
+        # 4. 更新权重（注意：不强制重置 cash，只基于真实交易结果）
+        # state.cash 已通过买卖操作自然更新
 
         # 5. 更新权重
         total_value_after = self._calculate_portfolio_value(state, next_navs)
+        if total_value_after <= 0:
+            return trades  # 无有效持仓
+
         state.weights = {}
         for fund_code, shares in state.holdings.items():
             nav = next_navs.get(fund_code, 0)
@@ -869,13 +1026,13 @@ from domain.backtest.strategies.portfolio_momentum import (
     MomentumConfig,
 )
 from domain.backtest.strategies.rebalance.threshold import ThresholdRebalancePolicy
-from infrastructure.datasource.akshare_source import AkshareDataSource
+from infrastructure.datasource.akshare_source import AkShareDataSource
 
 class PortfolioBacktestService:
     """组合回测服务。"""
 
-    def __init__(self, datasource: AkshareDataSource | None = None):
-        self.datasource = datasource or AkshareDataSource()
+    def __init__(self, datasource: AkShareDataSource | None = None):
+        self.datasource = datasource or AkShareDataSource()
         self.engine = PortfolioBacktestEngine()
 
     def run_portfolio_backtest(
@@ -889,14 +1046,35 @@ class PortfolioBacktestService:
         rebalance_policy_name: str | None = None,
         rebalance_params: dict | None = None,
     ) -> dict:
-        """运行组合回测。"""
-        # 1. 获取 NAV 数据
+        """运行组合回测。
+
+        Args:
+            fund_codes: 基金池代码列表
+            strategy_name: 策略名称
+            strategy_params: 策略参数
+            start_date: 回测起始日期
+            end_date: 回测结束日期
+            initial_cash: 初始资金
+            rebalance_policy_name: 再平衡策略名称
+            rebalance_params: 再平衡策略参数
+
+        Returns:
+            组合回测结果
+        """
+        # 1. 创建策略（先创建以获取 lookback_days）
+        strategy = self._create_strategy(strategy_name, strategy_params)
+        lookback_days = strategy_params.get("lookback_days", 60)
+
+        # 2. 获取 NAV 数据（使用日期范围过滤）
         nav_histories = {}
         for fund_code in fund_codes:
-            nav_histories[fund_code] = self.datasource.get_fund_nav_history(fund_code)
-
-        # 2. 创建策略
-        strategy = self._create_strategy(strategy_name, strategy_params)
+            full_history = self.datasource.get_fund_nav_history(fund_code)
+            # 过滤到指定日期范围
+            filtered = [
+                d for d in full_history
+                if start_date <= d["date"] <= end_date
+            ]
+            nav_histories[fund_code] = filtered
 
         # 3. 创建 RebalancePolicy
         rebalance_policy = None
@@ -911,6 +1089,7 @@ class PortfolioBacktestService:
             fund_codes=fund_codes,
             nav_histories=nav_histories,
             rebalance_policy=rebalance_policy,
+            lookback_days=lookback_days,
         )
 
         return result

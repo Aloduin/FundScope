@@ -228,3 +228,110 @@ class TestImportHoldings:
                 account_id=self._get_unique_id("nonexistent"),
                 mode="append",
             )
+
+    def test_replace_existing_account(self):
+        """Test replace mode clears old positions and adds new."""
+        account_id = self._get_unique_id("004")
+        self.service.create_account(account_id, 100000.0)
+
+        # Add existing position
+        self.service.execute_buy(account_id, "000099", "旧基金", 10000.0, 1.0)
+
+        # Import new holdings
+        holdings = [
+            {"fund_code": "000001", "fund_name": "基金A", "amount": 20000.0},
+        ]
+
+        result = self.service.import_holdings(
+            holdings=holdings,
+            account_id=account_id,
+            mode="replace",
+        )
+
+        assert result["imported_count"] == 1
+        assert result["created_new_account"] is False
+
+        account = self.service.get_account(account_id)
+        # cash should be reset to initial_cash, then 20000 deducted
+        assert abs(account.cash - 80000.0) < 0.01
+        assert len(account.positions) == 1
+        assert account.positions[0]["fund_code"] == "000001"
+
+        # Old position should be gone
+        assert account.get_position("000099") is None
+
+    def test_replace_clears_trade_records(self):
+        """Test replace mode clears old trade records."""
+        account_id = self._get_unique_id("005")
+        self.service.create_account(account_id, 100000.0)
+
+        # Add existing trade
+        self.service.execute_buy(account_id, "000099", "旧基金", 10000.0, 1.0)
+
+        # Replace with new holdings
+        holdings = [{"fund_code": "000001", "fund_name": "基金A", "amount": 5000.0}]
+
+        self.service.import_holdings(
+            holdings=holdings,
+            account_id=account_id,
+            mode="replace",
+        )
+
+        account = self.service.get_account(account_id)
+        # Only one trade (from import)
+        assert len(account.trades) == 1
+        assert account.trades[0].fund_code == "000001"
+
+    def test_replace_creates_new_account(self):
+        """Test replace mode creates new account if not exists."""
+        account_id = self._get_unique_id("006")
+
+        holdings = [{"fund_code": "000001", "fund_name": "基金A", "amount": 10000.0}]
+
+        result = self.service.import_holdings(
+            holdings=holdings,
+            account_id=account_id,
+            mode="replace",
+            initial_cash=50000.0,
+        )
+
+        assert result["imported_count"] == 1
+        assert result["created_new_account"] is True
+
+        account = self.service.get_account(account_id)
+        assert account is not None
+        assert abs(account.cash - 40000.0) < 0.01  # 50000 - 10000
+        assert account.initial_cash == 50000.0
+
+    def test_replace_new_account_insufficient_cash_raises(self):
+        """Test replace mode raises when initial_cash insufficient."""
+        account_id = self._get_unique_id("007")
+
+        holdings = [{"fund_code": "000001", "fund_name": "基金A", "amount": 100000.0}]
+
+        with pytest.raises(ValueError, match="Initial cash.*must be >= total amount"):
+            self.service.import_holdings(
+                holdings=holdings,
+                account_id=account_id,
+                mode="replace",
+                initial_cash=50000.0,
+            )
+
+    def test_replace_empty_holdings(self):
+        """Test replace with empty holdings clears account."""
+        account_id = self._get_unique_id("008")
+        self.service.create_account(account_id, 100000.0)
+        self.service.execute_buy(account_id, "000001", "基金A", 10000.0, 1.0)
+
+        result = self.service.import_holdings(
+            holdings=[],
+            account_id=account_id,
+            mode="replace",
+        )
+
+        assert result["imported_count"] == 0
+
+        account = self.service.get_account(account_id)
+        assert len(account.positions) == 0
+        assert len(account.trades) == 0
+        assert abs(account.cash - 100000.0) < 0.01  # Reset to initial_cash

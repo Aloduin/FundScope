@@ -279,17 +279,112 @@ class SimulationService:
         initial_cash: float,
         created_new_account: bool,
     ) -> dict:
-        """Replace account holdings with imported holdings."""
-        # Placeholder - will implement in next task
+        """Replace account holdings (in-memory then persist)."""
+        # Get or create account
+        account = self.get_account(account_id)
+
+        if account is None:
+            # Create new account
+            if initial_cash < total_amount:
+                raise ValueError(
+                    f"Initial cash ({initial_cash:.2f}) must be >= total amount ({total_amount:.2f})"
+                )
+            account = self.create_account(account_id, initial_cash)
+        else:
+            # Reset to initial state (in memory)
+            initial_cash = account.initial_cash
+
+        # Clear account state in memory
+        account.positions = []
+        account.trades = []
+        account.cash = initial_cash
+
+        # Execute buys in memory
+        reason = "从持仓诊断页导入，按 NAV=1.0 初始化模拟持仓"
+        imported_count = 0
+
+        for h in holdings:
+            buy(account, h["fund_code"], h["fund_name"], h["amount"], nav, reason=reason)
+            imported_count += 1
+
+        # Persist to database (single transaction)
+        self._persist_replace(account)
+
         return {
-            "account": None,
+            "account": account,
             "created_new_account": created_new_account,
-            "imported_count": 0,
+            "imported_count": imported_count,
             "skipped_count": 0,
             "mode": "replace",
             "nav_used": nav,
-            "message": "Not implemented",
+            "message": f"已将 {imported_count} 条持仓导入账户 {account_id}（替换模式）",
         }
+
+    def _persist_replace(self, account: VirtualAccount) -> None:
+        """Persist replace operation to database."""
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        try:
+            # Clear old data
+            cursor.execute(
+                "DELETE FROM virtual_account_equity_curve WHERE account_id = ?",
+                (account.account_id,)
+            )
+            cursor.execute(
+                "DELETE FROM virtual_account_position WHERE account_id = ?",
+                (account.account_id,)
+            )
+            cursor.execute(
+                "DELETE FROM trade_record WHERE account_id = ?",
+                (account.account_id,)
+            )
+
+            # Update account cash
+            cursor.execute(
+                "UPDATE virtual_account SET cash = ? WHERE account_id = ?",
+                (account.cash, account.account_id)
+            )
+
+            # Insert new positions
+            for pos in account.positions:
+                if isinstance(pos, dict):
+                    cursor.execute("""
+                        INSERT INTO virtual_account_position (
+                            account_id, fund_code, fund_name, amount, weight, shares, cost_nav
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        account.account_id,
+                        pos["fund_code"],
+                        pos.get("fund_name", ""),
+                        pos["amount"],
+                        pos.get("weight", 0.0),
+                        pos.get("shares"),
+                        pos.get("cost_nav"),
+                    ))
+
+            # Insert new trades
+            for trade in account.trades:
+                cursor.execute("""
+                    INSERT INTO trade_record (
+                        trade_id, account_id, fund_code, action, amount, nav, shares, trade_date, reason
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    trade.trade_id,
+                    trade.account_id,
+                    trade.fund_code,
+                    trade.action,
+                    trade.amount,
+                    trade.nav,
+                    trade.shares,
+                    trade.trade_date.isoformat(),
+                    trade.reason,
+                ))
+
+            conn.commit()
+            logger.info(f"Replaced account {account.account_id} with {len(account.positions)} positions")
+        finally:
+            conn.close()
 
     def _persist_account(self, account: VirtualAccount) -> None:
         """Persist new account to SQLite."""

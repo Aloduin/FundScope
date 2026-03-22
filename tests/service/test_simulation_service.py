@@ -154,3 +154,28 @@ class TestSimulationService:
         assert len(account.trades) >= 1
         assert account.trades[0].action == "BUY"
         assert account.trades[0].account_id == account_id
+
+
+class TestImportHoldings:
+    """Tests for import_holdings method."""
+
+    def setup_method(self):
+        """Set up test fixtures with unique account IDs."""
+        self.service = SimulationService()
+        self.test_prefix = f"test_import_{uuid.uuid4().hex[:8]}"
+
+    def _get_unique_id(self, suffix: str) -> str:
+        """Generate unique account ID for test."""
+        return f"{self.test_prefix}_{suffix}"
+
+    def test_invalid_mode_raises_value_error(self):
+        """Test that invalid mode raises ValueError."""
+        account_id = self._get_unique_id("001")
+        holdings = [{"fund_code": "000001", "fund_name": "测试基金", "amount": 10000.0}]
+
+        with pytest.raises(ValueError, match="Invalid mode"):
+            self.service.import_holdings(
+                holdings=holdings,
+                account_id=account_id,
+                mode="invalid",
+            )

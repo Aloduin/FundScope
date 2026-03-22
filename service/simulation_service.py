@@ -188,6 +188,51 @@ class SimulationService:
 
         return trade
 
+    def import_holdings(
+        self,
+        holdings: list[dict],
+        account_id: str,
+        mode: str = "append",
+        initial_cash: float = 0.0,
+        nav: float = 1.0,
+    ) -> dict:
+        """Import holdings to virtual account.
+
+        Args:
+            holdings: List of holdings with fund_code, fund_name, amount
+            account_id: Account identifier (required)
+            mode: "append" or "replace"
+            initial_cash: Initial cash for new accounts
+            nav: Net value for trades (default 1.0)
+
+        Returns:
+            Dict with account, created_new_account, imported_count, etc.
+
+        Raises:
+            ValueError: If mode invalid, account not found, or insufficient cash
+        """
+        # Validate mode
+        if mode not in ("append", "replace"):
+            raise ValueError(f"Invalid mode: {mode}. Must be 'append' or 'replace'.")
+
+        # Calculate total amount
+        total_amount = sum(h.get("amount", 0) for h in holdings)
+
+        # Check if account exists
+        account = self.get_account(account_id)
+        created_new_account = account is None
+
+        # Placeholder - will implement logic in subsequent tasks
+        return {
+            "account": account,
+            "created_new_account": created_new_account,
+            "imported_count": 0,
+            "skipped_count": 0,
+            "mode": mode,
+            "nav_used": nav,
+            "message": "Not implemented",
+        }
+
     def _persist_account(self, account: VirtualAccount) -> None:
         """Persist new account to SQLite."""
         conn = get_connection()

@@ -281,7 +281,7 @@ class ThresholdRebalancePolicy(RebalancePolicy):
 - 仅当偏差 **大于** 阈值时触发调仓
 - `target_weights` 必须由上游归一化（sum ≈ 1.0）
 
-**Phase 3A 状态：** 实现但不接入主流程，等待 engine 层提供组合状态支持。
+**Phase 3A 状态：** RebalancePolicy 与 ThresholdRebalancePolicy **仅完成接口定义与占位实现**，不纳入回测主链路、不进入 UI、不要求端到端验证。等待后续 Phase（需 engine 层提供组合状态支持）再接入主流程。
 
 ---
 
@@ -323,10 +323,6 @@ composite = CompositeStrategy(primary_strategy=dca, modifier=None)
 | CompositeStrategy + 无 modifier | 等同于原策略输出 |
 | DCA + MAFilter（上涨趋势 BUY） | 信号通过 |
 | DCA + MAFilter（下跌趋势 BUY） | 信号被拦截 |
-| DCA + MAFilter（上涨趋势 SELL） | 信号被拦截 |
-| DCA + MAFilter（下跌趋势 SELL） | 信号通过 |
-| DCA + MAFilter（HOLD 信号） | 信号通过（HOLD 无条件放行）|
-| DCA + MAFilter（REBALANCE 信号）| 信号通过（REBALANCE 无条件放行）|
 | MAFilter 数据不足 | 默认放行，`trend_relation="unknown"` |
 | MAFilter filter_mode 无效 | NotImplementedError |
 | get_blocked_signals() | 返回被拦截的信号记录 |
@@ -335,6 +331,20 @@ composite = CompositeStrategy(primary_strategy=dca, modifier=None)
 | CompositeStrategy nav_history 恰好 window 条 | 可计算 MA，正常过滤 |
 | 同一 fund_code 多次被拦截 | _blocked_signals 累加多条记录 |
 | 被拦截信号的 reason 字段 | explain_block() 返回值被正确存储 |
+
+**MAFilter 过滤规则专项测试（使用 MockStrategy）：**
+
+| 测试用例 | 验证点 |
+|---|---|
+| MockStrategy 产出 BUY + MAFilter（上涨趋势） | 信号通过 |
+| MockStrategy 产出 BUY + MAFilter（下跌趋势） | 信号被拦截 |
+| MockStrategy 产出 SELL + MAFilter（上涨趋势） | 信号被拦截 |
+| MockStrategy 产出 SELL + MAFilter（下跌趋势） | 信号通过 |
+| MockStrategy 产出 SELL + MAFilter（等于均线） | 信号被拦截 |
+| MockStrategy 产出 HOLD + MAFilter（任意趋势） | 信号通过（HOLD 无条件放行）|
+| MockStrategy 产出 REBALANCE + MAFilter（任意趋势）| 信号通过（REBALANCE 无条件放行）|
+
+**说明：** 由于 DCA 策略只产出 BUY 信号，SELL/HOLD/REBALANCE 相关测试需使用 MockStrategy 或自定义测试策略，确保 MAFilter 过滤逻辑被独立验证。
 
 ---
 

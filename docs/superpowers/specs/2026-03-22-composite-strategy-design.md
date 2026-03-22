@@ -9,7 +9,7 @@
 ## 一、背景与目标
 
 ### 1.1 当前状态
-- 已有 3 个单策略：DCA、MA、Momentum
+- 已有 2 个单策略：DCA、MA
 - `BacktestEngine` 只能运行单个策略
 - 无组合策略能力
 
@@ -33,7 +33,6 @@ domain/backtest/strategies/
 ├── base.py              # Strategy 基类（已有）
 ├── dca.py               # DCA 策略（已有）
 ├── ma.py                # MA 策略（已有）
-├── momentum.py          # Momentum 策略（已有）
 ├── composite.py         # CompositeStrategy（新增）
 ├── modifiers/
 │   ├── __init__.py
@@ -50,7 +49,6 @@ domain/backtest/strategies/
 Strategy (abstract)
 ├── DCAStrategy
 ├── MAStrategy
-├── MomentumStrategy
 └── CompositeStrategy
     ├── primary_strategy: Strategy
     └── modifier: SignalModifier
@@ -67,7 +65,7 @@ Strategy (abstract)
 class SignalContext:
     date: date
     current_nav: float
-    indicators: dict[str, float | str | bool]
+    indicators: dict[str, float | str | bool | None]
 ```
 
 **职责：** 为 SignalModifier 提供预计算的上下文信息。
@@ -137,6 +135,10 @@ class MAFilter(SignalModifier):
         self.filter_mode = filter_mode
         if filter_mode != "trend_confirm":
             raise NotImplementedError(f"filter_mode={filter_mode} not supported in Phase 3A")
+
+    def name(self) -> str:
+        """Return modifier name in format 'MAFilter(window, mode)'."""
+        return f"MAFilter({self.window}, {self.filter_mode})"
 ```
 
 ### 4.2 过滤规则（trend_confirm）
@@ -155,7 +157,20 @@ class MAFilter(SignalModifier):
 
 **一句话规则：** 上涨趋势只允许买入，下跌趋势只允许卖出。
 
-### 4.3 数据不足处理
+### 4.3 explain_block 返回值示例
+
+```python
+# BUY below trend
+"买入信号被拦截：当前净值低于20日均线"
+
+# SELL above trend
+"卖出信号被拦截：当前净值高于20日均线"
+
+# BUY/SELL equal to MA
+"信号被拦截：当前净值等于均线，趋势不明确"
+```
+
+### 4.4 数据不足处理
 
 当 NAV 历史记录不足 `window` 条时：
 - `ma_available = False`
@@ -178,27 +193,59 @@ class CompositeStrategy(Strategy):
         self.primary_strategy = primary_strategy
         self.modifier = modifier
         self._blocked_signals: list[dict] = []
+
+    def name(self) -> str:
+        """Return composite strategy name in format 'Primary+Modifier(params)'."""
+        if self.modifier is None:
+            return self.primary_strategy.name()
+        return f"{self.primary_strategy.name()}+{self.modifier.name()}"
+
+    def get_blocked_signals(self) -> list[dict]:
+        """Return list of blocked signals from last generate_signals call."""
+        return self._blocked_signals.copy()
 ```
+
+**注意：** `_blocked_signals` 存储的是 Signal 对象的 **副本**（使用 `dataclasses.replace(signal)`），避免后续修改影响记录。
 
 ### 5.2 generate_signals 流程
 
 ```
 1. 清空 _blocked_signals
-2. 调用 primary_strategy.generate_signals(nav_history)
-3. 对每个 signal:
-   a. 构建 SignalContext（预计算指标）
+2. 若 nav_history 为空，直接返回空列表
+3. 调用 primary_strategy.generate_signals(nav_history)
+4. 对每个 signal:
+   a. 构建 SignalContext（CompositeStrategy 负责预计算指标）
    b. 调用 modifier.modify(signal, context)
-   c. 若返回 None，记录到 _blocked_signals
+   c. 若返回 None，记录到 _blocked_signals（存储副本）
    d. 若返回 Signal，加入最终结果
-4. 返回过滤后的信号列表
+5. 返回过滤后的信号列表
 ```
 
-### 5.3 SignalContext 构建
+**空输入处理：** 若 `nav_history` 为空列表，直接返回空列表，不调用主策略。
 
-对于 MAFilter：
+### 5.3 SignalContext 构建（由 CompositeStrategy 负责）
+
+**职责划分：**
+- **CompositeStrategy** 负责：遍历 nav_history，计算 MA 等指标值
+- **MAFilter** 负责：根据 SignalContext 中的 indicators 决定放行/拦截
+
+对于 MAFilter，CompositeStrategy 按以下步骤构建 SignalContext：
+
 1. 获取 `as_of_date` 及之前的 NAV 记录
-2. 若记录数 < window，标记 `ma_available=False`
-3. 否则计算均线值，判断 `trend_relation`
+2. 若记录数 < window，标记 `ma_available=False`，`trend_relation="unknown"`
+3. 否则计算均线值 `ma_value = sum(nav_list[-window:]) / window`
+4. 比较 `current_nav` 与 `ma_value`，确定 `trend_relation`
+5. 将所有信息打包到 `indicators` 字典中
+
+**示例 indicators 内容：**
+```python
+{
+    "ma_window": 20,
+    "ma_value": 1.0523,      # float | None
+    "trend_relation": "above",  # "above" | "below" | "equal" | "unknown"
+    "ma_available": True,
+}
+```
 
 ### 5.4 Blocked Signals 记录
 
@@ -278,10 +325,16 @@ composite = CompositeStrategy(primary_strategy=dca, modifier=None)
 | DCA + MAFilter（下跌趋势 BUY） | 信号被拦截 |
 | DCA + MAFilter（上涨趋势 SELL） | 信号被拦截 |
 | DCA + MAFilter（下跌趋势 SELL） | 信号通过 |
-| MAFilter 数据不足 | 默认放行 |
+| DCA + MAFilter（HOLD 信号） | 信号通过（HOLD 无条件放行）|
+| DCA + MAFilter（REBALANCE 信号）| 信号通过（REBALANCE 无条件放行）|
+| MAFilter 数据不足 | 默认放行，`trend_relation="unknown"` |
 | MAFilter filter_mode 无效 | NotImplementedError |
 | get_blocked_signals() | 返回被拦截的信号记录 |
 | CompositeStrategy.name() | 返回 "DCA+MAFilter(20, trend_confirm)" |
+| CompositeStrategy 空输入 | 返回空列表，不调用主策略 |
+| CompositeStrategy nav_history 恰好 window 条 | 可计算 MA，正常过滤 |
+| 同一 fund_code 多次被拦截 | _blocked_signals 累加多条记录 |
+| 被拦截信号的 reason 字段 | explain_block() 返回值被正确存储 |
 
 ---
 

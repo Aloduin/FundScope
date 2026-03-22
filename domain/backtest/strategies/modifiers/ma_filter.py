@@ -30,17 +30,19 @@ class MAFilter(SignalModifier):
 
         if signal.action == "BUY":
             if trend == "above":
+                ma_str = f"{ma_value:.4f}" if ma_value is not None else "N/A"
                 return dataclasses.replace(
                     signal,
-                    reason=f"{signal.reason}（上涨趋势确认，MA{window}={ma_value:.4f}）"
+                    reason=f"{signal.reason}（上涨趋势确认，MA{window}={ma_str}）"
                 )
             return None
 
         if signal.action == "SELL":
             if trend == "below":
+                ma_str = f"{ma_value:.4f}" if ma_value is not None else "N/A"
                 return dataclasses.replace(
                     signal,
-                    reason=f"{signal.reason}（下跌趋势确认，MA{window}={ma_value:.4f}）"
+                    reason=f"{signal.reason}（下跌趋势确认，MA{window}={ma_str}）"
                 )
             return None
 

@@ -236,34 +236,35 @@ git commit -m "feat(backtest): add SignalModifier abstract base class"
 - [ ] **Step 1: Write the failing tests for MAFilter**
 
 ```python
-# tests/domain/backtest/strategies/test_composite.py - add after TestSignalModifierABC
-
-from datetime import date
-from domain.backtest.models import Signal, SignalContext
-from domain.backtest.strategies.modifiers.ma_filter import MAFilter
-
+# tests/domain/backtest/strategies/test_composite.py
+# 在 TestSignalModifierABC 类后面添加以下代码
+# 注意：导入放在类方法内部，避免前序任务提前失败
 
 class TestMAFilter:
     """Tests for MAFilter signal modifier."""
 
     def test_mafilter_name_format(self):
         """MAFilter name should include window and mode."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20, filter_mode="trend_confirm")
         assert ma_filter.name() == "MAFilter(20, trend_confirm)"
 
     def test_mafilter_default_params(self):
         """MAFilter should have default window=20 and filter_mode='trend_confirm'."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter()
         assert ma_filter.window == 20
         assert ma_filter.filter_mode == "trend_confirm"
 
     def test_mafilter_invalid_filter_mode_raises(self):
         """MAFilter should raise NotImplementedError for unsupported filter_mode."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         with pytest.raises(NotImplementedError):
             MAFilter(window=20, filter_mode="unsupported_mode")
 
     def test_mafilter_buy_above_ma_passes(self):
-        """BUY signal above MA should pass."""
+        """BUY signal above MA should pass with updated reason."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20)
         signal = Signal(
             date=date(2023, 6, 15),
@@ -275,14 +276,16 @@ class TestMAFilter:
         context = SignalContext(
             date=date(2023, 6, 15),
             current_nav=1.05,
-            indicators={"trend_relation": "above", "ma_available": True}
+            indicators={"trend_relation": "above", "ma_available": True, "ma_value": 1.03, "ma_window": 20}
         )
         result = ma_filter.modify(signal, context)
         assert result is not None
         assert result.action == "BUY"
+        assert "上涨趋势" in result.reason  # 放行时应补充 allow reason
 
     def test_mafilter_buy_below_ma_blocked(self):
         """BUY signal below MA should be blocked."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20)
         signal = Signal(
             date=date(2023, 6, 15),
@@ -300,7 +303,8 @@ class TestMAFilter:
         assert result is None
 
     def test_mafilter_sell_below_ma_passes(self):
-        """SELL signal below MA should pass."""
+        """SELL signal below MA should pass with updated reason."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20)
         signal = Signal(
             date=date(2023, 6, 15),
@@ -312,14 +316,16 @@ class TestMAFilter:
         context = SignalContext(
             date=date(2023, 6, 15),
             current_nav=0.95,
-            indicators={"trend_relation": "below", "ma_available": True}
+            indicators={"trend_relation": "below", "ma_available": True, "ma_value": 1.03, "ma_window": 20}
         )
         result = ma_filter.modify(signal, context)
         assert result is not None
         assert result.action == "SELL"
+        assert "下跌趋势" in result.reason  # 放行时应补充 allow reason
 
     def test_mafilter_sell_above_ma_blocked(self):
         """SELL signal above MA should be blocked."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20)
         signal = Signal(
             date=date(2023, 6, 15),
@@ -338,6 +344,7 @@ class TestMAFilter:
 
     def test_mafilter_buy_equal_ma_blocked(self):
         """BUY signal equal to MA should be blocked."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20)
         signal = Signal(
             date=date(2023, 6, 15),
@@ -354,8 +361,28 @@ class TestMAFilter:
         result = ma_filter.modify(signal, context)
         assert result is None
 
+    def test_mafilter_sell_equal_ma_blocked(self):
+        """SELL signal equal to MA should be blocked."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
+        ma_filter = MAFilter(window=20)
+        signal = Signal(
+            date=date(2023, 6, 15),
+            fund_code="000001",
+            action="SELL",
+            confidence=0.7,
+            reason="test sell"
+        )
+        context = SignalContext(
+            date=date(2023, 6, 15),
+            current_nav=1.00,
+            indicators={"trend_relation": "equal", "ma_available": True}
+        )
+        result = ma_filter.modify(signal, context)
+        assert result is None
+
     def test_mafilter_hold_always_passes(self):
         """HOLD signal should always pass regardless of trend."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20)
         signal = Signal(
             date=date(2023, 6, 15),
@@ -375,6 +402,7 @@ class TestMAFilter:
 
     def test_mafilter_rebalance_always_passes(self):
         """REBALANCE signal should always pass regardless of trend."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20)
         signal = Signal(
             date=date(2023, 6, 15),
@@ -393,6 +421,7 @@ class TestMAFilter:
 
     def test_mafilter_unknown_trend_passes(self):
         """Signal with unknown trend (insufficient data) should pass."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20)
         signal = Signal(
             date=date(2023, 6, 15),
@@ -411,6 +440,7 @@ class TestMAFilter:
 
     def test_mafilter_explain_block_buy_below(self):
         """explain_block should return Chinese message for BUY below MA."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20)
         signal = Signal(
             date=date(2023, 6, 15),
@@ -430,6 +460,7 @@ class TestMAFilter:
 
     def test_mafilter_explain_block_sell_above(self):
         """explain_block should return Chinese message for SELL above MA."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20)
         signal = Signal(
             date=date(2023, 6, 15),
@@ -449,6 +480,7 @@ class TestMAFilter:
 
     def test_mafilter_explain_block_equal(self):
         """explain_block should return message for equal to MA."""
+        from domain.backtest.strategies.modifiers.ma_filter import MAFilter
         ma_filter = MAFilter(window=20)
         signal = Signal(
             date=date(2023, 6, 15),
@@ -495,10 +527,12 @@ class MAFilter(SignalModifier):
         return f"MAFilter({self.window}, {self.filter_mode})"
 
     def modify(self, signal: Signal, context: SignalContext) -> Signal | None:
-        """Return modified signal, or None to block."""
+        """Return modified signal with allow reason, or None to block."""
         trend = context.indicators.get("trend_relation", "unknown")
+        ma_value = context.indicators.get("ma_value")
+        window = context.indicators.get("ma_window", self.window)
 
-        # HOLD and REBALANCE always pass
+        # HOLD and REBALANCE always pass (no reason modification needed)
         if signal.action in ("HOLD", "REBALANCE"):
             return signal
 
@@ -509,13 +543,21 @@ class MAFilter(SignalModifier):
         # BUY: allow only in uptrend (above MA)
         if signal.action == "BUY":
             if trend == "above":
-                return signal
+                # 补充 allow reason
+                return dataclasses.replace(
+                    signal,
+                    reason=f"{signal.reason}（上涨趋势确认，MA{window}={ma_value:.4f}）"
+                )
             return None  # Block BUY in downtrend or equal
 
         # SELL: allow only in downtrend (below MA)
         if signal.action == "SELL":
             if trend == "below":
-                return signal
+                # 补充 allow reason
+                return dataclasses.replace(
+                    signal,
+                    reason=f"{signal.reason}（下跌趋势确认，MA{window}={ma_value:.4f}）"
+                )
             return None  # Block SELL in uptrend or equal
 
         # Unknown action - allow by default
@@ -781,8 +823,10 @@ class TestCompositeStrategy:
         mock_strategy = MockStrategy([signal1])
         composite = CompositeStrategy(primary_strategy=mock_strategy, modifier=MAFilter())
 
-        # First call with declining nav (will block)
-        nav_decline = [{"date": date(2023, 6, i), "nav": 1.0 - i * 0.01} for i in range(1, 50)]
+        # First call with declining nav (will block) - use generate_mock_nav_history to avoid invalid dates
+        nav_decline = generate_mock_nav_history(date(2023, 1, 1), periods=60)
+        for i, record in enumerate(nav_decline):
+            record["nav"] = 1.0 - i * 0.005  # Declining trend
         composite.generate_signals(nav_decline)
         assert len(composite.get_blocked_signals()) == 1
 
@@ -792,6 +836,16 @@ class TestCompositeStrategy:
         assert len(composite.get_blocked_signals()) == 1  # Not 2
 
     # --- DCA + MAFilter integration tests ---
+
+    def test_rebalance_policy_blocked_in_phase3a(self):
+        """CompositeStrategy should reject RebalancePolicy in Phase 3A."""
+        from domain.backtest.strategies.rebalance.threshold import ThresholdRebalancePolicy
+
+        dca = DCAStrategy(invest_amount=1000)
+        rebalance_policy = ThresholdRebalancePolicy(threshold=0.05)
+
+        with pytest.raises(NotImplementedError, match="RebalancePolicy is not supported"):
+            CompositeStrategy(primary_strategy=dca, modifier=rebalance_policy)
 
     def test_dca_mafilter_uptrend_buy_passes(self):
         """DCA BUY in uptrend should pass through MAFilter."""
@@ -851,14 +905,16 @@ class TestCompositeStrategy:
         """_blocked_signals should accumulate multiple blocked signals."""
         # Create multiple BUY signals that will be blocked
         signals = [
-            Signal(date=date(2023, 6, 10), fund_code="000001", action="BUY", confidence=0.7, reason="buy1"),
-            Signal(date=date(2023, 6, 15), fund_code="000001", action="BUY", confidence=0.7, reason="buy2"),
-            Signal(date=date(2023, 6, 20), fund_code="000001", action="BUY", confidence=0.7, reason="buy3"),
+            Signal(date=date(2023, 1, 10), fund_code="000001", action="BUY", confidence=0.7, reason="buy1"),
+            Signal(date=date(2023, 1, 20), fund_code="000001", action="BUY", confidence=0.7, reason="buy2"),
+            Signal(date=date(2023, 1, 30), fund_code="000001", action="BUY", confidence=0.7, reason="buy3"),
         ]
         mock_strategy = MockStrategy(signals)
 
-        # Declining nav history
-        nav_history = [{"date": date(2023, 6, i), "nav": 1.0 - i * 0.01} for i in range(1, 50)]
+        # Declining nav history - use generate_mock_nav_history to avoid invalid dates
+        nav_history = generate_mock_nav_history(date(2023, 1, 1), periods=60)
+        for i, record in enumerate(nav_history):
+            record["nav"] = 1.0 - i * 0.005  # Declining trend
 
         composite = CompositeStrategy(primary_strategy=mock_strategy, modifier=MAFilter())
         composite.generate_signals(nav_history)
@@ -945,7 +1001,10 @@ from domain.backtest.strategies.modifiers.base import SignalModifier
 
 
 class CompositeStrategy(Strategy):
-    """Strategy that wraps a primary strategy and applies a signal modifier."""
+    """Strategy that wraps a primary strategy and applies a signal modifier.
+
+    Phase 3A: Only supports SignalModifier. RebalancePolicy is explicitly blocked.
+    """
 
     def __init__(
         self,
@@ -955,6 +1014,16 @@ class CompositeStrategy(Strategy):
         self.primary_strategy = primary_strategy
         self.modifier = modifier
         self._blocked_signals: list[dict] = []
+
+        # Phase 3A: 明确禁止 RebalancePolicy
+        if modifier is not None:
+            # 检查是否是 RebalancePolicy 的实例（通过模块名判断）
+            modifier_module = type(modifier).__module__
+            if "rebalance" in modifier_module:
+                raise NotImplementedError(
+                    "RebalancePolicy is not supported in Phase 3A. "
+                    "Use SignalModifier (e.g., MAFilter) instead."
+                )
 
     def name(self) -> str:
         """Return composite strategy name in format 'Primary+Modifier(params)'."""
@@ -1016,8 +1085,18 @@ class CompositeStrategy(Strategy):
             if record["date"] == signal_date:
                 current_nav = record["nav"]
 
+        # Fallback logic: 如果找不到同日 NAV，使用最近的可用 NAV
         if current_nav is None:
-            current_nav = navs_up_to_signal[-1] if navs_up_to_signal else 1.0
+            if navs_up_to_signal:
+                # 使用信号日期之前最近的 NAV
+                current_nav = navs_up_to_signal[-1]
+            else:
+                # nav_history 中没有任何早于或等于信号日期的记录
+                # 这是数据问题，抛出明确错误而不是返回 magic number
+                raise ValueError(
+                    f"No NAV data available for signal date {signal_date}. "
+                    f"nav_history should contain records on or before this date."
+                )
 
         # Calculate MA indicators (for MAFilter)
         window = getattr(self.modifier, 'window', 20) if self.modifier else 20

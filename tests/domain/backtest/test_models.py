@@ -101,6 +101,46 @@ class TestExecutedTrade:
         assert trade.shares == 8000.0
 
 
+class TestSignalContext:
+    """Tests for SignalContext dataclass."""
+
+    def test_signal_context_creation(self):
+        from datetime import date
+        from domain.backtest.models import SignalContext
+
+        context = SignalContext(
+            date=date(2023, 6, 15),
+            current_nav=1.05,
+            indicators={
+                "ma_window": 20,
+                "ma_value": 1.03,
+                "trend_relation": "above",
+                "ma_available": True,
+            }
+        )
+
+        assert context.date == date(2023, 6, 15)
+        assert context.current_nav == 1.05
+        assert context.indicators["ma_window"] == 20
+        assert context.indicators["trend_relation"] == "above"
+
+    def test_signal_context_allows_none_in_indicators(self):
+        from datetime import date
+        from domain.backtest.models import SignalContext
+
+        context = SignalContext(
+            date=date(2023, 6, 15),
+            current_nav=1.05,
+            indicators={
+                "ma_value": None,
+                "ma_available": False,
+            }
+        )
+
+        assert context.indicators["ma_value"] is None
+        assert context.indicators["ma_available"] is False
+
+
 class TestBacktestResult:
     """Tests for BacktestResult dataclass."""
 

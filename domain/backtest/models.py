@@ -35,6 +35,14 @@ class Signal:
 
 
 @dataclass
+class SignalContext:
+    """Context information for signal modification."""
+    date: date
+    current_nav: float
+    indicators: dict[str, float | str | bool | None]
+
+
+@dataclass
 class BacktestResult:
     """Backtest result summary."""
     strategy_name: str

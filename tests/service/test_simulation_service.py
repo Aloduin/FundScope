@@ -335,3 +335,104 @@ class TestImportHoldings:
         assert len(account.positions) == 0
         assert len(account.trades) == 0
         assert abs(account.cash - 100000.0) < 0.01  # Reset to initial_cash
+
+    def test_return_structure_complete(self):
+        """Test that return dict has all required keys."""
+        account_id = self._get_unique_id("009")
+        self.service.create_account(account_id, 100000.0)
+
+        holdings = [{"fund_code": "000001", "fund_name": "基金A", "amount": 5000.0}]
+
+        result = self.service.import_holdings(
+            holdings=holdings,
+            account_id=account_id,
+            mode="append",
+        )
+
+        required_keys = [
+            "account", "created_new_account", "imported_count",
+            "skipped_count", "mode", "nav_used", "message"
+        ]
+        for key in required_keys:
+            assert key in result, f"Missing key: {key}"
+
+    def test_append_different_fund_codes_succeeds(self):
+        """Test append with different fund_codes succeeds on same day."""
+        account_id = self._get_unique_id("010b")
+        self.service.create_account(account_id, 100000.0)
+
+        # Import different funds
+        holdings = [
+            {"fund_code": "000001", "fund_name": "基金A", "amount": 5000.0},
+            {"fund_code": "000002", "fund_name": "基金B", "amount": 3000.0},
+        ]
+
+        result = self.service.import_holdings(
+            holdings=holdings, account_id=account_id, mode="append"
+        )
+
+        assert result["imported_count"] == 2
+        account = self.service.get_account(account_id)
+        assert len(account.positions) == 2
+
+    def test_append_empty_holdings(self):
+        """Test append with empty holdings does nothing."""
+        account_id = self._get_unique_id("011")
+        self.service.create_account(account_id, 100000.0)
+
+        result = self.service.import_holdings(
+            holdings=[],
+            account_id=account_id,
+            mode="append",
+        )
+
+        assert result["imported_count"] == 0
+        account = self.service.get_account(account_id)
+        assert abs(account.cash - 100000.0) < 0.01
+
+    def test_replace_same_day_twice_succeeds(self):
+        """Test replace twice on same day succeeds (trade_id cleared each time)."""
+        account_id = self._get_unique_id("012")
+        self.service.create_account(account_id, 100000.0)
+
+        holdings = [{"fund_code": "000001", "fund_name": "基金A", "amount": 5000.0}]
+
+        # First replace
+        result1 = self.service.import_holdings(
+            holdings=holdings, account_id=account_id, mode="replace"
+        )
+        assert result1["imported_count"] == 1
+
+        # Second replace same day
+        result2 = self.service.import_holdings(
+            holdings=holdings, account_id=account_id, mode="replace"
+        )
+        assert result2["imported_count"] == 1
+
+        # Should have only one trade record
+        account = self.service.get_account(account_id)
+        assert len(account.trades) == 1
+
+    # NOTE: Keep xfail test at end to avoid database lock affecting subsequent tests
+    @pytest.mark.xfail(reason="Known limitation: same-day same-fund append causes trade_id collision (see spec Section 八)")
+    def test_append_same_fund_code_accumulates(self):
+        """Test append accumulates same fund_code position.
+
+        NOTE: This test is expected to FAIL due to a known limitation.
+        The domain layer's _generate_trade_id() creates duplicate IDs for
+        same-day same-fund trades, causing IntegrityError on the second import.
+        See spec Section 八: "同日同基金追加 trade_id 冲突"
+        """
+        account_id = self._get_unique_id("010")
+        self.service.create_account(account_id, 100000.0)
+
+        # First import
+        holdings = [{"fund_code": "000001", "fund_name": "基金A", "amount": 5000.0}]
+        self.service.import_holdings(holdings=holdings, account_id=account_id, mode="append")
+
+        # Second import same fund - will fail with IntegrityError
+        self.service.import_holdings(holdings=holdings, account_id=account_id, mode="append")
+
+        account = self.service.get_account(account_id)
+        assert len(account.positions) == 1
+        assert abs(account.positions[0]["amount"] - 10000.0) < 0.01

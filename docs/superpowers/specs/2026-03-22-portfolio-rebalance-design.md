@@ -163,10 +163,20 @@ class PortfolioBacktestResult:
 
 **文件：** `domain/backtest/models.py`
 
+现有 `ExecutedTrade` 字段：`date, fund_code, action, amount, nav, shares, reason`
+
+新增可选字段：
+
 ```python
 @dataclass
 class ExecutedTrade:
-    # ... 现有字段 ...
+    date: date
+    fund_code: str
+    action: Literal["BUY", "SELL"]
+    amount: float
+    nav: float
+    shares: float
+    reason: str
     rebalance_id: str | None = None  # 可追溯到某次组合调仓信号
 ```
 
@@ -533,10 +543,10 @@ class PortfolioBacktestEngine:
             else:
                 signal_to_execute = None
 
-            # 4.5 T+1 执行（如果当天有要执行的信号）
-            # 注意：信号在 T 日产生，我们在 T 日记录它，在下一次循环（T+1）执行
-            # 这里简化处理：信号在 T 日产生，我们在 T 日就执行（用 T 日 NAV）
-            # 实际应该用 T+1 NAV
+            # 4.5 T+1 执行逻辑
+            # 信号在 T 日（current_date）产生，策略使用 T 日收盘后数据计算
+            # 实际执行在 T+1 日（next_date），使用 T+1 的 NAV 成交
+            # 这符合实际投资中"T 日信号，T+1 执行"的规则
 
             if signal_to_execute and i + 1 < len(aligned_dates):
                 # 获取 T+1 的 NAV
@@ -546,7 +556,7 @@ class PortfolioBacktestEngine:
                 # 4.6 应用 RebalancePolicy
                 if rebalance_policy:
                     context = self._build_context(current_date, current_navs)
-                    current_positions = self._get_current_positions(state)
+                    current_positions = self._get_current_positions(state, current_navs)
                     signal_to_execute = rebalance_policy.apply(
                         signal_to_execute, current_positions, context
                     )
@@ -611,24 +621,46 @@ class PortfolioBacktestEngine:
             value += shares * nav
         return value
 
-    def _get_current_positions(self, state: PortfolioState) -> list[dict]:
-        """获取当前持仓列表。"""
-        total_value = state.cash + sum(state.holdings.values())  # 简化，实际需要 NAV
+    def _get_current_positions(
+        self,
+        state: PortfolioState,
+        current_navs: dict[str, float]
+    ) -> list[dict]:
+        """获取当前持仓列表（含权重）。"""
+        total_value = self._calculate_portfolio_value(state, current_navs)
         positions = []
 
         for fund_code, shares in state.holdings.items():
+            nav = current_navs.get(fund_code, 0)
+            value = shares * nav
             positions.append({
                 "fund_code": fund_code,
                 "shares": shares,
-                "weight": 0.0  # 实际计算需要 NAV
+                "value": value,
+                "weight": value / total_value if total_value > 0 else 0.0
+            })
+
+        # 补充 CASH 持仓
+        if state.cash > 0:
+            positions.append({
+                "fund_code": "CASH",
+                "shares": state.cash,
+                "value": state.cash,
+                "weight": state.cash / total_value if total_value > 0 else 0.0
             })
 
         return positions
 
     def _build_context(self, current_date: date, current_navs: dict[str, float]) -> SignalContext:
-        """构造信号上下文。"""
+        """构造信号上下文。
+
+        注意：组合级上下文中 current_nav 使用 0.0 作为占位符，
+        因为多基金场景没有单一"当前净值"概念。
+        实际净值信息通过 indicators 字段传递。
+        """
         return SignalContext(
             date=current_date,
+            current_nav=0.0,  # 组合级占位符
             indicators=current_navs
         )
 
@@ -669,9 +701,10 @@ class PortfolioBacktestEngine:
                     date=execution_date,
                     fund_code=fund_code,
                     action="SELL",
-                    shares=shares,
-                    price=nav,
                     amount=amount,
+                    nav=nav,
+                    shares=shares,
+                    reason=f"再平衡调出: {rebalance_id}",
                     rebalance_id=rebalance_id,
                 ))
 
@@ -698,9 +731,10 @@ class PortfolioBacktestEngine:
                     date=execution_date,
                     fund_code=fund_code,
                     action="BUY",
-                    shares=shares_to_buy,
-                    price=nav,
                     amount=delta,
+                    nav=nav,
+                    shares=shares_to_buy,
+                    reason=f"再平衡调入: {rebalance_id}",
                     rebalance_id=rebalance_id,
                 ))
             elif delta < 0:
@@ -713,9 +747,10 @@ class PortfolioBacktestEngine:
                     date=execution_date,
                     fund_code=fund_code,
                     action="SELL",
-                    shares=shares_to_sell,
-                    price=nav,
                     amount=-delta,
+                    nav=nav,
+                    shares=shares_to_sell,
+                    reason=f"再平衡减仓: {rebalance_id}",
                     rebalance_id=rebalance_id,
                 ))
 
@@ -762,8 +797,44 @@ class PortfolioBacktestEngine:
             "total_return": total_return,
             "annualized_return": annualized_return,
             "max_drawdown": max_dd,
-            "sharpe_ratio": 0.0,  # TODO: 实现
+            "sharpe_ratio": self._calculate_sharpe_ratio(equity_curve, annualized_return),
         }
+
+    def _calculate_sharpe_ratio(
+        self,
+        equity_curve: list[tuple[date, float]],
+        annualized_return: float
+    ) -> float:
+        """计算夏普比率。
+
+        简化假设：无风险利率 = 0。
+        """
+        if len(equity_curve) < 2:
+            return 0.0
+
+        # 计算日收益率
+        values = [v for _, v in equity_curve]
+        daily_returns = []
+        for i in range(1, len(values)):
+            daily_return = (values[i] - values[i-1]) / values[i-1]
+            daily_returns.append(daily_return)
+
+        if not daily_returns:
+            return 0.0
+
+        # 计算日收益率标准差
+        import statistics
+        std_dev = statistics.stdev(daily_returns) if len(daily_returns) > 1 else 0.0
+
+        if std_dev == 0:
+            return 0.0
+
+        # 年化标准差
+        annualized_std = std_dev * (252 ** 0.5)
+
+        # 夏普比率 = (年化收益 - 无风险利率) / 年化标准差
+        # 简化：无风险利率 = 0
+        return annualized_return / annualized_std
 ```
 
 ---
@@ -798,7 +869,7 @@ from domain.backtest.strategies.portfolio_momentum import (
     MomentumConfig,
 )
 from domain.backtest.strategies.rebalance.threshold import ThresholdRebalancePolicy
-from infrastructure.data_source import AkshareDataSource
+from infrastructure.datasource.akshare_source import AkshareDataSource
 
 class PortfolioBacktestService:
     """组合回测服务。"""
@@ -933,9 +1004,40 @@ if fund_codes_input:
 | `domain/backtest/strategies/portfolio_momentum.py` | 新增 `PortfolioMomentumStrategy` |
 | `domain/backtest/strategies/rebalance/policy.py` | 修订接口为 `apply()` |
 | `domain/backtest/strategies/rebalance/threshold.py` | 完整实现 `ThresholdRebalancePolicy` |
+| `domain/backtest/strategies/__init__.py` | 导出 `PortfolioStrategy` |
 | `domain/backtest/engine.py` | 新增 `PortfolioBacktestEngine` |
 | `service/portfolio_backtest_service.py` | 新增 |
 | `ui/pages/3_strategy_lab.py` | 新增组合回测区块 |
+
+### 10.1 接口变更迁移说明
+
+**RebalancePolicy 接口变更：**
+
+原有接口（Phase 3A 存根）：
+```python
+def rebalance(
+    self,
+    current_positions: list[dict],
+    target_weights: dict[str, float],
+    context: SignalContext
+) -> list[Signal]
+```
+
+新接口（Phase 3C）：
+```python
+def apply(
+    self,
+    signal: PortfolioSignal,
+    current_positions: list[dict],
+    context: SignalContext,
+) -> PortfolioSignal | None
+```
+
+**影响范围：**
+- `domain/backtest/strategies/rebalance/threshold.py`：需完整重写
+- `tests/domain/backtest/strategies/rebalance/`：需更新测试
+
+**注意：** 现有 `CompositeStrategy` 中有 guard code 拒绝 `RebalancePolicy` 实例，Phase 3C 不会修改此逻辑。再平衡型组合使用独立的 `PortfolioBacktestEngine`，不通过 `CompositeStrategy`。
 
 ---
 

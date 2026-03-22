@@ -69,6 +69,7 @@ class TestBlockedSignalTrace:
         assert "买入信号被拦截" in trace.reason
 
     def test_backtest_result_blocked_signals_default_empty(self):
+        from datetime import date
         from domain.backtest.models import BacktestResult
 
         result = BacktestResult(
@@ -399,6 +400,9 @@ signals = strategy.generate_signals(nav_history)
 blocked_signals = strategy.get_blocked_signals()  # Add this line
 
 # domain/backtest/engine.py - update BacktestResult construction (line 124-138):
+# NOTE: Use the existing executed_trades variable maintained by the engine.
+# If the engine internally uses a different variable name (e.g., 'trades'),
+# ensure it is renamed to executed_trades before this change, or use the correct name here.
 return BacktestResult(
     strategy_name=strategy.name(),
     fund_code=fund_code,
@@ -615,8 +619,11 @@ elif strategy_name == "DCA + MA Filter":
 
 ```python
 # ui/pages/3_strategy_lab.py - add after trade statistics section (after line 327)
-# Add explanation panel for composite strategies
-if strategy_name == "DCA + MA Filter":
+# IMPORTANT: Check result.strategy_name instead of dropdown value to avoid UI state issues
+# when user changes dropdown after running backtest
+is_composite_result = "MAFilter" in result.strategy_name
+
+if is_composite_result:
     st.divider()
     with st.expander("📋 信号解释", expanded=False):
         final_signal_count = len(result.signals)

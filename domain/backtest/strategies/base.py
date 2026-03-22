@@ -1,6 +1,6 @@
 """Abstract strategy interface for FundScope backtest."""
 from abc import ABC, abstractmethod
-from domain.backtest.models import Signal
+from domain.backtest.models import Signal, BlockedSignalTrace
 
 
 class Strategy(ABC):
@@ -15,3 +15,7 @@ class Strategy(ABC):
     def generate_signals(self, nav_history: list[dict]) -> list[Signal]:
         """Generate trading signals from NAV history."""
         raise NotImplementedError
+
+    def get_blocked_signals(self) -> list[BlockedSignalTrace]:
+        """Default: no blocked signals."""
+        return []

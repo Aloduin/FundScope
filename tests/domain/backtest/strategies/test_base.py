@@ -57,3 +57,20 @@ class TestStrategyInterface:
 
         with pytest.raises(TypeError):
             IncompleteStrategy()
+
+    def test_strategy_default_get_blocked_signals_returns_empty_list(self):
+        """Test that default get_blocked_signals returns empty list."""
+        from domain.backtest.models import BlockedSignalTrace
+
+        class MinimalStrategy(Strategy):
+            def name(self) -> str:
+                return "Minimal"
+
+            def generate_signals(self, nav_history: list[dict]) -> list:
+                return []
+
+        strategy = MinimalStrategy()
+        result = strategy.get_blocked_signals()
+        assert result == []
+        # Verify return type annotation
+        assert isinstance(result, list)

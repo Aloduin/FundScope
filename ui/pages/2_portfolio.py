@@ -181,5 +181,99 @@ if st.session_state.holdings:
     if st.button("清空持仓"):
         st.session_state.holdings = []
         st.rerun()
+
+    # -----------------------------------------------------------------------
+    # Send to Virtual Account Section
+    # -----------------------------------------------------------------------
+    st.divider()
+
+    # Only show when holdings exist (spec Section 五: 显示条件)
+    total_import_amount = sum(h["amount"] for h in st.session_state.holdings)
+
+    with st.expander("📤 发送到虚拟账户", expanded=False):
+        st.info("⚠️ 所有持仓将按 NAV=1.0 建仓，仅用于建立模拟起点，不代表真实持仓成本。")
+
+        col_left, col_right = st.columns(2)
+        with col_left:
+            account_type = st.radio(
+                "目标账户类型",
+                options=["新建账户", "已有账户"],
+                horizontal=True,
+                key="va_account_type",
+            )
+
+        if account_type == "新建账户":
+            new_account_id = st.text_input(
+                "账户 ID",
+                placeholder="输入新账户 ID",
+                key="va_new_account_id",
+            )
+            min_cash = total_import_amount
+            initial_cash_input = st.number_input(
+                "初始资金",
+                min_value=float(min_cash),
+                value=float(min_cash),
+                step=10000.0,
+                key="va_initial_cash",
+            )
+            mode = "replace"  # New account always uses replace
+        else:
+            existing_account_id = st.text_input(
+                "账户 ID",
+                placeholder="输入已有账户 ID",
+                key="va_existing_account_id",
+            )
+            mode = st.radio(
+                "导入模式",
+                options=["追加到现有持仓", "替换现有持仓"],
+                horizontal=True,
+                key="va_import_mode",
+            )
+            mode = "append" if mode == "追加到现有持仓" else "replace"
+
+        if st.button("确认导入", type="primary", key="btn_import_to_va"):
+            from service.simulation_service import SimulationService as SimService
+
+            va_service = SimService()
+
+            # Determine account_id based on type
+            if account_type == "新建账户":
+                account_id = new_account_id
+                initial_cash = initial_cash_input
+            else:
+                account_id = existing_account_id
+                initial_cash = 0.0  # Not used for existing account
+
+            # Validate account_id
+            if not account_id or not account_id.strip():
+                st.warning("请输入账户 ID")
+            else:
+                try:
+                    result = va_service.import_holdings(
+                        holdings=st.session_state.holdings,
+                        account_id=account_id,
+                        mode=mode,
+                        initial_cash=initial_cash,
+                        nav=1.0,
+                    )
+
+                    st.success(
+                        f"✅ 已将 {result['imported_count']} 条持仓导入账户 {account_id}（模式：{mode}）"
+                    )
+                    st.page_link("pages/3_strategy_lab.py", label="前往策略验证页查看 →")
+
+                except ValueError as e:
+                    error_msg = str(e)
+                    if "Account not found" in error_msg:
+                        st.error(f"未找到账户 {account_id}，请先在策略验证页创建账户")
+                    elif "Insufficient cash" in error_msg:
+                        account = va_service.get_account(account_id)
+                        current_cash = account.cash if account else 0
+                        needed = total_import_amount
+                        st.error(f"账户余额不足，无法追加导入。当前余额：¥{current_cash:,.0f}，需要：¥{needed:,.0f}")
+                    elif "Initial cash" in error_msg:
+                        st.error(f"初始资金必须 ≥ 持仓总金额 ¥{total_import_amount:,.0f}")
+                    else:
+                        st.error(f"导入失败：{error_msg}")
 else:
     st.info("👈 请添加持仓后开始诊断")

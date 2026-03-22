@@ -64,19 +64,23 @@ if search_btn and fund_code:
                 st.metric("数据完整度", f"{score.data_completeness:.0%}", help="评分可信度")
 
             with col2:
-                # Dimension scores
+                # Dimension scores with explanations
                 dimensions = {
-                    "收益": score.return_score,
-                    "风险": score.risk_score,
-                    "稳定性": score.stability_score,
-                    "成本": score.cost_score,
-                    "规模": score.size_score,
-                    "经理": score.manager_score,
+                    "收益": (score.return_score, "基于年化收益率计算"),
+                    "风险": (score.risk_score, "基于最大回撤和波动率计算"),
+                    "稳定性": (score.stability_score, "基于胜率和修复因子计算"),
+                    "成本": (score.cost_score, "费率数据暂未接入，使用估算值"),
+                    "规模": (score.size_score, "基于基金规模计算，20-100亿为佳"),
+                    "经理": (score.manager_score, "基于基金经理任职年限计算"),
                 }
 
-                for dim, val in dimensions.items():
+                for dim, (val, explanation) in dimensions.items():
                     if val is not None:
-                        st.metric(dim, f"{val:.1f}")
+                        # Mark placeholder scores with visual indicator
+                        if dim == "成本":
+                            st.metric(dim, f"{val:.1f} ⏳", help=explanation)
+                        else:
+                            st.metric(dim, f"{val:.1f}", help=explanation)
                     else:
                         st.metric(dim, "N/A", help="数据缺失")
 

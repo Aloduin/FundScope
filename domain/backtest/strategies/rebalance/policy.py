@@ -1,20 +1,30 @@
 """Abstract base class for rebalance policies."""
 from abc import ABC, abstractmethod
-from domain.backtest.models import Signal, SignalContext
+from domain.backtest.models import PortfolioSignal, SignalContext
 
 
 class RebalancePolicy(ABC):
-    """Phase 3A: interface only, not integrated into main backtest flow."""
+    """Signal filter for portfolio-level rebalance signals.
+
+    Determines whether a PortfolioSignal should be executed given
+    current positions and market context.
+    """
 
     @abstractmethod
     def name(self) -> str:
         raise NotImplementedError
 
     @abstractmethod
-    def rebalance(
+    def apply(
         self,
+        signal: PortfolioSignal,
         current_positions: list[dict],
-        target_weights: dict[str, float],
-        context: SignalContext
-    ) -> list[Signal]:
+        context: SignalContext,
+    ) -> PortfolioSignal | None:
+        """决定是否执行组合级再平衡信号。
+
+        Returns:
+            PortfolioSignal if signal should be executed,
+            None if signal should be blocked.
+        """
         raise NotImplementedError

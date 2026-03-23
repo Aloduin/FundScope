@@ -1,24 +1,27 @@
 """Threshold-based rebalance policy."""
-from domain.backtest.models import Signal, SignalContext
+from domain.backtest.models import PortfolioSignal, SignalContext
 from domain.backtest.strategies.rebalance.policy import RebalancePolicy
 
 
 class ThresholdRebalancePolicy(RebalancePolicy):
-    """Stub only for Phase 3A."""
+    """Passes a rebalance signal only when any weight deviates >= threshold."""
 
-    def __init__(self, threshold: float = 0.05, mode: str = "threshold"):
+    def __init__(self, threshold: float = 0.05):
         self.threshold = threshold
-        self.mode = mode
-        if mode != "threshold":
-            raise NotImplementedError(f"mode={mode} not supported in Phase 3A")
 
     def name(self) -> str:
         return f"ThresholdRebalance({self.threshold:.0%})"
 
-    def rebalance(
+    def apply(
         self,
+        signal: PortfolioSignal,
         current_positions: list[dict],
-        target_weights: dict[str, float],
-        context: SignalContext
-    ) -> list[Signal]:
-        return []
+        context: SignalContext,
+    ) -> PortfolioSignal | None:
+        current = {p["fund_code"]: p["weight"] for p in current_positions}
+        all_codes = set(signal.target_weights) | set(current)
+        max_deviation = max(
+            abs(signal.target_weights.get(code, 0.0) - current.get(code, 0.0))
+            for code in all_codes
+        )
+        return signal if max_deviation >= self.threshold else None

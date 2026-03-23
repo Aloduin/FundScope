@@ -1,7 +1,7 @@
 """Tests for backtest domain models."""
 import pytest
 from datetime import date
-from domain.backtest.models import Signal, ExecutedTrade, BacktestResult
+from domain.backtest.models import Signal, ExecutedTrade, BacktestResult, PortfolioSignal, PortfolioBacktestResult
 
 
 class TestSignal:
@@ -209,3 +209,103 @@ class TestBlockedSignalTrace:
         )
 
         assert result.blocked_signals == []
+
+
+class TestPortfolioSignal:
+    """Tests for PortfolioSignal model."""
+
+    def test_valid_portfolio_signal(self):
+        signal = PortfolioSignal(
+            date=date(2023, 1, 15),
+            action="REBALANCE",
+            target_weights={"000001": 0.4, "000002": 0.4, "CASH": 0.2},
+            confidence=1.0,
+            reason="Test rebalance",
+        )
+        assert signal.action == "REBALANCE"
+        assert signal.target_weights["CASH"] == 0.2
+
+    def test_missing_cash_raises_error(self):
+        with pytest.raises(ValueError, match="must include 'CASH'"):
+            PortfolioSignal(
+                date=date(2023, 1, 15),
+                action="REBALANCE",
+                target_weights={"000001": 0.5, "000002": 0.5},
+            )
+
+    def test_weights_not_summing_to_one_raises_error(self):
+        with pytest.raises(ValueError, match="must sum to 1.0"):
+            PortfolioSignal(
+                date=date(2023, 1, 15),
+                action="REBALANCE",
+                target_weights={"000001": 0.5, "000002": 0.3, "CASH": 0.1},
+            )
+
+    def test_hold_signal_no_weights(self):
+        signal = PortfolioSignal(
+            date=date(2023, 1, 15),
+            action="HOLD",
+            reason="No signal",
+        )
+        assert signal.action == "HOLD"
+        assert signal.target_weights is None
+
+    def test_confidence_out_of_range_raises_error(self):
+        with pytest.raises(ValueError, match="confidence"):
+            PortfolioSignal(
+                date=date(2023, 1, 15),
+                action="HOLD",
+                reason="test",
+                confidence=1.5,
+            )
+
+
+class TestPortfolioBacktestResult:
+    """Tests for PortfolioBacktestResult model."""
+
+    def test_create_portfolio_backtest_result(self):
+        result = PortfolioBacktestResult(
+            strategy_name="PortfolioMomentum",
+            fund_codes=["000001", "000002"],
+            start_date=date(2023, 1, 1),
+            end_date=date(2023, 12, 31),
+            total_return=0.15,
+            annualized_return=0.15,
+            max_drawdown=0.08,
+            sharpe_ratio=1.2,
+        )
+        assert result.strategy_name == "PortfolioMomentum"
+        assert result.fund_codes == ["000001", "000002"]
+        assert result.equity_curve == []
+        assert result.rebalance_signals == []
+        assert result.executed_trades == []
+        assert result.portfolio_weights_history == []
+
+
+class TestExecutedTradeExtension:
+    """Tests for ExecutedTrade rebalance_id field."""
+
+    def test_executed_trade_with_rebalance_id(self):
+        trade = ExecutedTrade(
+            date=date(2023, 1, 15),
+            fund_code="000001",
+            action="BUY",
+            amount=10000.0,
+            nav=1.5,
+            shares=6666.67,
+            reason="Test trade",
+            rebalance_id="rebalance_2023-01-15",
+        )
+        assert trade.rebalance_id == "rebalance_2023-01-15"
+
+    def test_executed_trade_without_rebalance_id(self):
+        trade = ExecutedTrade(
+            date=date(2023, 1, 15),
+            fund_code="000001",
+            action="BUY",
+            amount=10000.0,
+            nav=1.5,
+            shares=6666.67,
+            reason="Test trade",
+        )
+        assert trade.rebalance_id is None
